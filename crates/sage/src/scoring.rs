@@ -60,6 +60,8 @@ pub struct Feature {
     pub peptide_len: usize,
     /// Spectrum id
     pub spec_id: String,
+    /// Precursor id
+    pub prec_id: usize,
     /// File identifier
     pub file_id: usize,
     /// PSM rank
@@ -239,6 +241,7 @@ impl<'db> Scorer<'db> {
         );
         bounded_min_heapify(&mut hits.preliminary, k);
         hits.preliminary.truncate(k);
+        // Q: could default peptide idx be done here?
     }
 
     /// Preliminary Score, return # of matched peaks per candidate
@@ -373,15 +376,31 @@ impl<'db> Scorer<'db> {
         }
     }
 
+    fn notched_initial_hits(&self, query: &ProcessedSpectrum) -> (InitialHits, Vec<usize>) {
+        let mut cumsum = 0;
+        let mut hits = InitialHits::default();
+        // Match lengths is pre cumulative sum of the number of hits for each precursor
+        let mut cum_match_lengths = Vec::with_capacity(query.precursors.len());
+
+        for precursor in &query.precursors {
+            let precursor_hits = self.initial_hits(query, precursor);
+            cumsum += precursor_hits.preliminary.len();
+            hits += precursor_hits;
+            cum_match_lengths.push(cumsum);
+        }
+
+        (hits, cum_match_lengths)
+    }
+
     /// Score a single [`ProcessedSpectrum`] against the database
     pub fn score_standard(&self, query: &ProcessedSpectrum) -> Vec<Feature> {
-        let precursor = query.precursors.get(0).unwrap_or_else(|| {
-            panic!("missing MS1 precursor for {}", query.id);
-        });
+        if query.precursors.is_empty() {
+            panic!("missing precursor for {}", query.id);
+        }
+        let (hits, match_lens) = self.notched_initial_hits(query);
 
-        let hits = self.initial_hits(query, precursor);
         let mut features = Vec::with_capacity(self.report_psms);
-        self.build_features(query, precursor, &hits, self.report_psms, &mut features);
+        self.build_features(query, &query.precursors, &hits, self.report_psms, &mut features, &match_lens);
         features
     }
 
@@ -390,45 +409,50 @@ impl<'db> Scorer<'db> {
     fn build_features(
         &self,
         query: &ProcessedSpectrum,
-        precursor: &Precursor,
+        precursor: &[Precursor],
         hits: &InitialHits,
         report_psms: usize,
         features: &mut Vec<Feature>,
+        index_rle: &[usize],
     ) {
-        let mut score_vector = hits
-            .preliminary
-            .iter()
-            .filter(|score| score.peptide != PeptideIx::default())
-            .map(|pre| self.score_candidate(query, pre))
-            .filter(|s| (s.0.matched_b + s.0.matched_y) >= self.min_matched_peaks)
-            .collect::<Vec<_>>();
+        let mut score_vector = Vec::with_capacity(hits.preliminary.len());
+        for (idx, pre) in (0u8..).zip(hits.preliminary.iter()) {
+            if pre.peptide != PeptideIx::default() {
+                let score = self.score_candidate(query, pre);
+                if (score.0.matched_b + score.0.matched_y) >= self.min_matched_peaks {
+                    score_vector.push((score, idx));
+                }
+            }
+        };
 
         // Hyperscore is our primary score function for PSMs
-        score_vector.sort_by(|a, b| b.0.hyperscore.total_cmp(&a.0.hyperscore));
+        score_vector.sort_by(|(a, _i), (b, _ii)| b.0.hyperscore.total_cmp(&a.0.hyperscore));
 
         // Expected value for poisson distribution
         // (average # of matches peaks/peptide candidate)
         let lambda = hits.matched_peaks as f64 / hits.scored_candidates as f64;
 
-        // Sage operates on masses without protons; [M] instead of [MH+]
-        let mz = precursor.mz - PROTON;
-
         for idx in 0..report_psms.min(score_vector.len()) {
-            let score = score_vector[idx].0;
-            let fragments: Option<Fragments> = score_vector[idx].1.take();
+            let score = score_vector[idx].0.0;
+            let score_index = score_vector[idx].1 as usize;
+            let mut precursor_index: usize = 0;
+            while score_index >= index_rle[precursor_index] {
+                precursor_index += 1;
+            }
+
+            let fragments: Option<Fragments> = score_vector[idx].0.1.take();
             let psm_id = increment_psm_counter();
 
             let peptide = &self.db[score.peptide];
-            let precursor_mass = mz * score.precursor_charge as f32;
 
             let next = score_vector
                 .get(idx + 1)
-                .map(|score| score.0.hyperscore)
+                .map(|score| score.0.0.hyperscore)
                 .unwrap_or_default();
 
             let best = score_vector
                 .get(0)
-                .map(|score| score.0.hyperscore)
+                .map(|score| score.0.0.hyperscore)
                 .expect("we know that index 0 is valid");
 
             // Poisson distribution probability mass function
@@ -440,6 +464,9 @@ impl<'db> Scorer<'db> {
                 poisson = 1E-325;
             }
 
+            // Sage operates on masses without protons; [M] instead of [MH+]
+            let mz = precursor[precursor_index].mz - PROTON;
+            let precursor_mass = mz * score.precursor_charge as f32;
             let isotope_error = score.isotope_error as f32 * NEUTRON;
             let delta_mass = (precursor_mass - peptide.monoisotopic - isotope_error).abs() * 2E6
                 / (precursor_mass - isotope_error + peptide.monoisotopic);
@@ -451,6 +478,7 @@ impl<'db> Scorer<'db> {
                 psm_id,
                 peptide_idx: score.peptide,
                 spec_id: query.id.clone(),
+                prec_id: precursor_index,
                 file_id: query.file_id,
                 rank: idx as u32 + 1,
                 label: peptide.label(),
@@ -539,18 +567,18 @@ impl<'db> Scorer<'db> {
     /// Return multiple PSMs for each spectra - first is the best match, second PSM is the best match
     /// after all theoretical peaks assigned to the best match are removed, etc
     pub fn score_chimera_fast(&self, query: &ProcessedSpectrum) -> Vec<Feature> {
-        let precursor = query.precursors.get(0).unwrap_or_else(|| {
-            panic!("missing MS1 precursor for {}", query.id);
-        });
+        if query.precursors.is_empty() {
+            panic!("missing precursor for {}", query.id);
+        }
 
         let mut query = query.clone();
-        let hits = self.initial_hits(&query, precursor);
+        let (hits, match_lengths) = self.notched_initial_hits(&query);
 
         let mut candidates: Vec<Feature> = Vec::with_capacity(self.report_psms);
 
         let mut prev = 0;
         while candidates.len() < self.report_psms {
-            self.build_features(&query, precursor, &hits, 1, &mut candidates);
+            self.build_features(&query, &query.precursors, &hits, 1, &mut candidates, &match_lengths);
             if candidates.len() > prev {
                 if let Some(feat) = candidates.get_mut(prev) {
                     self.remove_matched_peaks(&mut query, feat);
