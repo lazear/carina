@@ -77,4 +77,14 @@ impl Fasta {
             })
             .collect()
     }
+
+    pub fn iter_chunks(&self, chunk_size: usize) -> impl Iterator<Item = Self> + '_ {
+        self.targets
+            .chunks(chunk_size)
+            .map(move |target_chunk| Self {
+                targets: target_chunk.to_vec(),
+                decoy_tag: self.decoy_tag.clone(),
+                generate_decoys: self.generate_decoys,
+            })
+    }
 }

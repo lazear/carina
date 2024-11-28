@@ -84,6 +84,12 @@ pub struct Builder {
     pub generate_decoys: Option<bool>,
     /// Path to fasta database
     pub fasta: Option<String>,
+    /// Number of sequences to handle simultaneously when pre-filtering the db
+    pub prefilter_chunk_size: Option<usize>,
+    /// Pre-filter the database to minimize memory usage
+    pub prefilter: Option<bool>,
+    /// Pre-filter the database with a minimal amount of memory at the cost of speed
+    pub prefilter_low_memory: Option<bool>,
 }
 
 impl Builder {
@@ -102,6 +108,9 @@ impl Builder {
             max_variable_mods: self.max_variable_mods.map(|x| x.max(1)).unwrap_or(2),
             generate_decoys: self.generate_decoys.unwrap_or(true),
             fasta: self.fasta.expect("A fasta file must be provided!"),
+            prefilter_chunk_size: self.prefilter_chunk_size.unwrap_or(0),
+            prefilter: self.prefilter.unwrap_or(false),
+            prefilter_low_memory: self.prefilter_low_memory.unwrap_or(true),
         }
     }
 
@@ -124,6 +133,9 @@ pub struct Parameters {
     pub decoy_tag: String,
     pub generate_decoys: bool,
     pub fasta: String,
+    pub prefilter_chunk_size: usize,
+    pub prefilter: bool,
+    pub prefilter_low_memory: bool,
 }
 
 impl Parameters {
@@ -172,6 +184,12 @@ impl Parameters {
             })
             .collect::<Vec<_>>();
 
+        Self::reorder_peptides(&mut target_decoys);
+
+        target_decoys
+    }
+
+    pub fn reorder_peptides(target_decoys: &mut Vec<Peptide>) {
         log::trace!("sorting and deduplicating peptides");
 
         // This is equivalent to a stable sort
@@ -187,6 +205,9 @@ impl Parameters {
                 && remove.cterm == keep.cterm
             {
                 keep.proteins.extend(remove.proteins.iter().cloned());
+                // When merging peptides from different Fastas,
+                // decoys in one fasta might be targets in another
+                keep.decoy &= remove.decoy;
                 true
             } else {
                 false
@@ -196,13 +217,15 @@ impl Parameters {
         target_decoys
             .par_iter_mut()
             .for_each(|peptide| peptide.proteins.sort_unstable());
-
-        target_decoys
     }
 
     // pub fn build(self) -> Result<IndexedDatabase, Box<dyn std::error::Error + Send + Sync + 'static>> {
     pub fn build(self, fasta: Fasta) -> IndexedDatabase {
         let target_decoys = self.digest(&fasta);
+        self.build_from_peptides(target_decoys)
+    }
+
+    pub fn build_from_peptides(self, target_decoys: Vec<Peptide>) -> IndexedDatabase {
         log::trace!("generating fragments");
 
         // Finally, perform in silico digest for our target sequences
@@ -321,6 +344,7 @@ pub struct Theoretical {
     pub fragment_mz: f32,
 }
 
+#[derive(Default)]
 pub struct IndexedDatabase {
     pub peptides: Vec<Peptide>,
     pub fragments: Vec<Theoretical>,
@@ -598,6 +622,9 @@ mod test {
             decoy_tag: "rev_".into(),
             generate_decoys: false,
             fasta: "none".into(),
+            prefilter: false,
+            prefilter_chunk_size: 0,
+            prefilter_low_memory: true,
         };
 
         let peptides = params.digest(&fasta);

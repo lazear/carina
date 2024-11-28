@@ -4,11 +4,14 @@ use input::{Input, Search};
 use log::info;
 use rayon::prelude::*;
 use sage_cloudpath::CloudPath;
-use sage_core::database::IndexedDatabase;
+use sage_core::database::{IndexedDatabase, Parameters, PeptideIx};
+use sage_core::fasta::Fasta;
 use sage_core::mass::Tolerance;
+use sage_core::peptide::Peptide;
 use sage_core::scoring::{Feature, Scorer};
 use sage_core::spectrum::{ProcessedSpectrum, SpectrumProcessor};
 use sage_core::tmt::TmtQuant;
+use std::collections::HashSet;
 use std::time::Instant;
 
 mod input;
@@ -61,7 +64,7 @@ impl FromIterator<SageResults> for SageResults {
 }
 
 impl Runner {
-    pub fn new(parameters: Search) -> anyhow::Result<Self> {
+    pub fn new(parameters: Search, parallel: usize) -> anyhow::Result<Self> {
         let start = Instant::now();
         let fasta = sage_cloudpath::util::read_fasta(
             &parameters.database.fasta,
@@ -75,7 +78,18 @@ impl Runner {
             )
         })?;
 
-        let database = parameters.database.clone().build(fasta);
+        let database = match parameters.database.prefilter {
+            false => parameters.database.clone().build(fasta),
+            true => {
+                let mini_runner = Self {
+                    database: IndexedDatabase::default(),
+                    parameters: parameters.clone(),
+                    start,
+                };
+                let peptides = mini_runner.prefilter_peptides(parallel, fasta);
+                parameters.database.clone().build_from_peptides(peptides)
+            }
+        };
         info!(
             "generated {} fragments, {} peptides in {}ms",
             database.fragments.len(),
@@ -87,6 +101,107 @@ impl Runner {
             parameters,
             start,
         })
+    }
+
+    pub fn prefilter_peptides(self, parallel: usize, fasta: Fasta) -> Vec<Peptide> {
+        let spectra: Option<Vec<ProcessedSpectrum>> =
+            match parallel >= self.parameters.mzml_paths.len() {
+                true => Some(self.read_processed_spectra(&self.parameters.mzml_paths, 0, 0)),
+                false => None,
+            };
+        let mut all_peptides: Vec<Peptide> = fasta
+            .iter_chunks(self.parameters.database.prefilter_chunk_size)
+            .enumerate()
+            .flat_map(|(chunk_id, fasta_chunk)| {
+                let start = Instant::now();
+                info!("pre-filtering fasta chunk {}", chunk_id,);
+                let db = &self.parameters.database.clone().build(fasta_chunk);
+                info!(
+                    "generated {} fragments, {} peptides in {}ms",
+                    db.fragments.len(),
+                    db.peptides.len(),
+                    (Instant::now() - start).as_millis()
+                );
+                let scorer = Scorer {
+                    db,
+                    precursor_tol: self.parameters.precursor_tol,
+                    fragment_tol: self.parameters.fragment_tol,
+                    min_matched_peaks: self.parameters.min_matched_peaks,
+                    min_isotope_err: self.parameters.isotope_errors.0,
+                    max_isotope_err: self.parameters.isotope_errors.1,
+                    min_precursor_charge: self.parameters.precursor_charge.0,
+                    max_precursor_charge: self.parameters.precursor_charge.1,
+                    override_precursor_charge: self.parameters.override_precursor_charge,
+                    max_fragment_charge: self.parameters.max_fragment_charge,
+                    chimera: self.parameters.chimera,
+                    report_psms: self.parameters.report_psms + 1,
+                    wide_window: self.parameters.wide_window,
+                    annotate_matches: self.parameters.annotate_matches,
+                };
+                let peptide_idxs: HashSet<PeptideIx> = match &spectra {
+                    Some(spectra) => self.peptide_filter_processed_spectra(&scorer, spectra),
+                    None => self
+                        .parameters
+                        .mzml_paths
+                        .chunks(parallel)
+                        .enumerate()
+                        .flat_map(|(chunk_idx, chunk)| {
+                            let spectra_chunk =
+                                self.read_processed_spectra(chunk, chunk_idx, parallel);
+                            self.peptide_filter_processed_spectra(&scorer, &spectra_chunk)
+                        })
+                        .collect(),
+                }
+                .into_iter()
+                .collect();
+                let peptides: Vec<Peptide> = peptide_idxs
+                    .into_iter()
+                    .map(|idx| db[idx].clone())
+                    .collect();
+                info!(
+                    "found {} pre-filtered peptides for fasta chunk {}",
+                    peptides.len(),
+                    chunk_id,
+                );
+                peptides
+            })
+            .collect();
+        Parameters::reorder_peptides(&mut all_peptides);
+        all_peptides
+    }
+
+    fn peptide_filter_processed_spectra(
+        &self,
+        scorer: &Scorer,
+        spectra: &Vec<ProcessedSpectrum>,
+    ) -> Vec<PeptideIx> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let counter = AtomicUsize::new(0);
+        let start = Instant::now();
+
+        let peptide_idxs: Vec<_> = spectra
+            .par_iter()
+            .filter(|spec| spec.peaks.len() >= self.parameters.min_peaks && spec.level == 2)
+            .map(|x| {
+                let prev = counter.fetch_add(1, Ordering::Relaxed);
+                if prev > 0 && prev % 10_000 == 0 {
+                    let duration = Instant::now().duration_since(start).as_millis() as usize;
+
+                    let rate = prev * 1000 / (duration + 1);
+                    log::trace!("- searched {} spectra ({} spectra/s)", prev, rate);
+                }
+                x
+            })
+            .flat_map(|spec| {
+                scorer.quick_score(spec, self.parameters.database.prefilter_low_memory)
+            })
+            .collect();
+
+        let duration = Instant::now().duration_since(start).as_millis() as usize;
+        let prev = counter.load(Ordering::Relaxed);
+        let rate = prev * 1000 / (duration + 1);
+        log::info!("- search:  {:8} ms ({} spectra/s)", duration, rate);
+        peptide_idxs
     }
 
     fn spectrum_fdr(&self, features: &mut [Feature]) -> usize {
@@ -113,8 +228,8 @@ impl Runner {
     fn search_processed_spectra(
         &self,
         scorer: &Scorer,
-        spectra: Vec<ProcessedSpectrum>,
-    ) -> SageResults {
+        spectra: &Vec<ProcessedSpectrum>,
+    ) -> Vec<Feature> {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let counter = AtomicUsize::new(0);
         let start = Instant::now();
@@ -139,7 +254,14 @@ impl Runner {
         let prev = counter.load(Ordering::Relaxed);
         let rate = prev * 1000 / (duration + 1);
         log::info!("- search:  {:8} ms ({} spectra/s)", duration, rate);
+        features
+    }
 
+    fn complete_features(
+        &self,
+        spectra: Vec<ProcessedSpectrum>,
+        features: Vec<Feature>,
+    ) -> SageResults {
         let quant = self
             .parameters
             .quant
@@ -169,6 +291,17 @@ impl Runner {
         chunk_idx: usize,
         batch_size: usize,
     ) -> SageResults {
+        let spectra = self.read_processed_spectra(chunk, chunk_idx, batch_size);
+        let features = self.search_processed_spectra(scorer, &spectra);
+        self.complete_features(spectra, features)
+    }
+
+    fn read_processed_spectra(
+        &self,
+        chunk: &[String],
+        chunk_idx: usize,
+        batch_size: usize,
+    ) -> Vec<ProcessedSpectrum> {
         // Read all of the spectra at once - this can help prevent memory over-consumption issues
         info!(
             "processing files {} .. {} ",
@@ -244,7 +377,7 @@ impl Runner {
         let io_time = Instant::now() - start;
         info!("- file IO: {:8} ms", io_time.as_millis());
 
-        self.search_processed_spectra(scorer, spectra)
+        spectra
     }
 
     pub fn batch_files(&self, scorer: &Scorer, batch_size: usize) -> SageResults {
@@ -525,7 +658,9 @@ fn main() -> anyhow::Result<()> {
 
     let input = Input::from_arguments(matches)?;
 
-    let runner = input.build().and_then(Runner::new)?;
+    let runner = input
+        .build()
+        .and_then(|parameters| Runner::new(parameters, parallel))?;
 
     let tel = runner.run(parallel, parquet)?;
 
