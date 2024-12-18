@@ -4,7 +4,7 @@ use std::{
     str::FromStr,
 };
 
-use serde::{de::Visitor, Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::mass::VALID_AA;
 

@@ -235,7 +235,7 @@ pub fn picked_precursor(
         .map(|score| ((score.ix, score.decoy), score.q))
         .collect::<FnvHashMap<_, _>>();
 
-    peaks.par_iter_mut().for_each(|((ix), (peak, _))| {
+    peaks.par_iter_mut().for_each(|(ix, (peak, _))| {
         peak.q_value = scores[ix];
     });
     passing
