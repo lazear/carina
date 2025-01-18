@@ -3,10 +3,10 @@ use sage_core::{
     mass::Tolerance,
     spectrum::{Precursor, RawSpectrum, Representation},
 };
-use timsrust::readers::SpectrumReader;
-use timsrust::converters::ConvertableDomain;
-pub use timsrust::readers::SpectrumReaderConfig as BrukerSpectrumProcessor;
 use std::cmp::Ordering;
+use timsrust::converters::ConvertableDomain;
+use timsrust::readers::SpectrumReader;
+pub use timsrust::readers::SpectrumReaderConfig as BrukerSpectrumProcessor;
 
 pub struct TdfReader;
 
@@ -31,7 +31,12 @@ impl TdfReader {
         Ok(spectra)
     }
 
-    fn read_ms1_spectra(&self, path_name: impl AsRef<str>, file_id: usize, spectrum_reader: &SpectrumReader) -> Result<Vec<RawSpectrum>, timsrust::TimsRustError> {
+    fn read_ms1_spectra(
+        &self,
+        path_name: impl AsRef<str>,
+        file_id: usize,
+        spectrum_reader: &SpectrumReader,
+    ) -> Result<Vec<RawSpectrum>, timsrust::TimsRustError> {
         let start = std::time::Instant::now();
         let frame_reader = timsrust::readers::FrameReader::new(path_name.as_ref())?;
         let tdf_path = std::path::Path::new(path_name.as_ref()).join("analysis.tdf");
@@ -51,23 +56,28 @@ impl TdfReader {
                     let intensity: Vec<f32> = frame.intensities.iter().map(|&x| x as f32).collect();
                     let mut imss: Vec<f32> = vec![0.0; mz.len()];
                     // TODO: This is getting pretty big ... I should refactor this block.
-                    frame.scan_offsets.windows(2).enumerate().map(|(i, w)| {
-                        let num = w[1] - w[0];
-                        if num == 0 {
-                            return None;
-                        }
-                        let lo = w[0];
-                        let hi = w[1];
-
-                        let im = ims_converter.convert(i as f64) as f32;
-                        Some((im, lo, hi))
-                    }).for_each(|x| {
-                        if let Some((im, lo, hi)) = x {
-                            for i in lo..hi {
-                                imss[i] = im;
+                    frame
+                        .scan_offsets
+                        .windows(2)
+                        .enumerate()
+                        .map(|(i, w)| {
+                            let num = w[1] - w[0];
+                            if num == 0 {
+                                return None;
                             }
-                        }
-                    });
+                            let lo = w[0];
+                            let hi = w[1];
+
+                            let im = ims_converter.convert(i as f64) as f32;
+                            Some((im, lo, hi))
+                        })
+                        .for_each(|x| {
+                            if let Some((im, lo, hi)) = x {
+                                for i in lo..hi {
+                                    imss[i] = im;
+                                }
+                            }
+                        });
 
                     // Sort the mzs and intensities by mz
                     let mut indices: Vec<usize> = (0..mz.len()).collect();
@@ -84,11 +94,18 @@ impl TdfReader {
                     // Squash the mobility dimension
                     let tol_ppm = 15.0;
                     let im_tol_pct = 2.0;
-                    let (mz, (intensity, mobility)): (Vec<f32>, (Vec<f32>, Vec<f32>)) = dumbcentroid_frame(&sorted_mz, &sorted_inten, &sorted_imss, tol_ppm, im_tol_pct);
+                    let (mz, (intensity, mobility)): (Vec<f32>, (Vec<f32>, Vec<f32>)) =
+                        dumbcentroid_frame(
+                            &sorted_mz,
+                            &sorted_inten,
+                            &sorted_imss,
+                            tol_ppm,
+                            im_tol_pct,
+                        );
 
                     let scan_start_time = frame.rt as f32 / 60.0;
                     let ion_injection_time = 100.0; // This is made up, in theory we can read
-                    // if from the tdf file
+                                                    // if from the tdf file
                     let total_ion_current = sorted_inten.iter().sum::<f32>();
                     let id = frame.index.to_string();
 
@@ -111,12 +128,21 @@ impl TdfReader {
                     log::error!("error parsing spectrum: {:?}", x);
                     None
                 }
-            }).collect();
-        log::info!("read {} ms1 spectra in {:#?}", ms1_spectra.len(), start.elapsed());
+            })
+            .collect();
+        log::info!(
+            "read {} ms1 spectra in {:#?}",
+            ms1_spectra.len(),
+            start.elapsed()
+        );
         Ok(ms1_spectra)
     }
 
-    fn read_msn_spectra(&self, file_id: usize, spectrum_reader: &SpectrumReader) -> Result<Vec<RawSpectrum>, timsrust::TimsRustError> {
+    fn read_msn_spectra(
+        &self,
+        file_id: usize,
+        spectrum_reader: &SpectrumReader,
+    ) -> Result<Vec<RawSpectrum>, timsrust::TimsRustError> {
         let spectra: Vec<RawSpectrum> = (0..spectrum_reader.len())
             .into_par_iter()
             .filter_map(|index| match spectrum_reader.get(index) {
@@ -167,7 +193,13 @@ impl TdfReader {
     }
 }
 
-fn dumbcentroid_frame(mz_array: &[f32], intensity_array: &[f32], ims_array: &[f32], mz_tol_ppm: f32, im_tol_pct: f32) -> (Vec<f32>, (Vec<f32>, Vec<f32>)) {
+fn dumbcentroid_frame(
+    mz_array: &[f32],
+    intensity_array: &[f32],
+    ims_array: &[f32],
+    mz_tol_ppm: f32,
+    im_tol_pct: f32,
+) -> (Vec<f32>, (Vec<f32>, Vec<f32>)) {
     // Make sure the mz array is sorted
     assert!(mz_array.windows(2).all(|x| x[0] <= x[1]));
 
@@ -189,7 +221,8 @@ fn dumbcentroid_frame(mz_array: &[f32], intensity_array: &[f32], ims_array: &[f3
         im: f32,
     }
     let mut agg_buff = Vec::with_capacity(10_000.min(arr_len));
-    let mut touch_buff = [false; 1000];
+    const TOUCH_BUFF_SIZE: usize = 1000;
+    let mut touch_buff = [false; TOUCH_BUFF_SIZE];
 
     let utol = mz_tol_ppm / 1e6;
     let im_tol = im_tol_pct / 100.0;
@@ -205,15 +238,26 @@ fn dumbcentroid_frame(mz_array: &[f32], intensity_array: &[f32], ims_array: &[f3
         let left_e = mz - da_tol;
         let right_e = mz + da_tol;
 
-        let ss_start = mz_array.partition_point(|&x| x < left_e);
-        let ss_end = mz_array.partition_point(|&x| x <= right_e);
+        let mut ss_start = mz_array.partition_point(|&x| x < left_e);
+        let mut ss_end = mz_array.partition_point(|&x| x <= right_e);
 
-        let slice_width = ss_end - ss_start;
-        if slice_width > 1000 {
-            println!("slice_width: {}", slice_width);
-            println!("mz: {:.4}", mz);
-            println!("Limits: {:.4}, {:.4}", left_e, right_e);
-            println!("ss_start: {}, ss_end: {}", ss_start, ss_end);
+        let mut slice_width = ss_end - ss_start;
+        if slice_width >= 1000 {
+            // It is EXCEEDINGLY UNLIKELY that more than 1000 points
+            // will be aggregated or in the range of a single mz peak.
+            // Here we just handle those edge cases by making sure the 'center'
+            // will be aggregated.
+
+            let new_ss_start = idx.saturating_sub(TOUCH_BUFF_SIZE / 2);
+            let new_ss_end = new_ss_start + TOUCH_BUFF_SIZE - 1;
+            // TODO: make a better warning message here.
+            log::warn!(
+                "More than {} points are in the mz range of a point, limiting span",
+                TOUCH_BUFF_SIZE
+            );
+            ss_start = new_ss_start;
+            ss_end = new_ss_end;
+            slice_width = ss_end - ss_start;
         }
         let local_num_touched = touched[ss_start..ss_end].iter().filter(|&&x| x).count();
         let local_num_untouched = slice_width - local_num_touched;
@@ -244,16 +288,25 @@ fn dumbcentroid_frame(mz_array: &[f32], intensity_array: &[f32], ims_array: &[f3
                 intensity: curr_intensity,
                 im,
             });
-            touched[ss_start..ss_end].iter_mut().zip(
-                touch_buff.iter_mut().take(slice_width)
-            ).for_each(|(t, tb)| {
-                *t = true;
-                *tb = false;
-            });
+            touched[ss_start..ss_end]
+                .iter_mut()
+                .zip(touch_buff.iter_mut().take(slice_width))
+                .for_each(|(t, tb)| {
+                    *t = true;
+                    *tb = false;
+                });
             global_num_touched += num_touchable;
             const MAX_PEAKS: usize = 10000;
             if agg_buff.len() > MAX_PEAKS {
-                log::debug!("Reached limit of the agg buffer at index {}/{}", idx, arr_len);
+                let curr_loc_int = intensity_array[idx];
+                if curr_loc_int > 200.0 {
+                    log::debug!(
+                        "Reached limit of the agg buffer at index {}/{} curr int={}",
+                        idx,
+                        arr_len,
+                        curr_loc_int
+                    );
+                }
                 break;
             }
         }
@@ -267,7 +320,8 @@ fn dumbcentroid_frame(mz_array: &[f32], intensity_array: &[f32], ims_array: &[f3
 
     // Drop the zeros and sort
     // I could in theory truncate instead of filtering.
-    let mut result: Vec<(f32, (f32, f32))> = agg_buff.iter()
+    let mut result: Vec<(f32, (f32, f32))> = agg_buff
+        .iter()
         .filter(|&x| x.mz > 0.0 && x.intensity > 0.0)
         .map(|x| (x.mz, (x.intensity, x.im as f32)))
         .collect();
@@ -279,4 +333,3 @@ fn dumbcentroid_frame(mz_array: &[f32], intensity_array: &[f32], ims_array: &[f3
 
     result.into_iter().unzip()
 }
-

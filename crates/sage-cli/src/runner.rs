@@ -1,4 +1,3 @@
-
 use super::input::Search;
 use super::output::SageResults;
 use super::telemetry;
@@ -13,7 +12,7 @@ use sage_core::lfq::{Peak, PrecursorId};
 use sage_core::mass::Tolerance;
 use sage_core::scoring::Fragments;
 use sage_core::scoring::{Feature, Scorer};
-use sage_core::spectrum::{RawSpectrum, ProcessedSpectrum, SpectrumProcessor,MS1Spectra};
+use sage_core::spectrum::{MS1Spectra, ProcessedSpectrum, RawSpectrum, SpectrumProcessor};
 use sage_core::tmt::TmtQuant;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -37,18 +36,25 @@ impl FromParallelIterator<RawSpectrum> for RawSpectrumAccumulator {
     {
         let out = par_iter
             .into_par_iter()
-            .fold(|| RawSpectrumAccumulator::default(), |mut accum, spectrum| {
-                if spectrum.ms_level == 1 {
-                    accum.ms1.push(spectrum);
-                } else {
-                    accum.msn.push(spectrum);
-                }
-                accum
-            }).reduce(|| RawSpectrumAccumulator::default(), |mut a, b| {
-                a.ms1.extend(b.ms1);
-                a.msn.extend(b.msn);
-                a
-            });
+            .fold(
+                || RawSpectrumAccumulator::default(),
+                |mut accum, spectrum| {
+                    if spectrum.ms_level == 1 {
+                        accum.ms1.push(spectrum);
+                    } else {
+                        accum.msn.push(spectrum);
+                    }
+                    accum
+                },
+            )
+            .reduce(
+                || RawSpectrumAccumulator::default(),
+                |mut a, b| {
+                    a.ms1.extend(b.ms1);
+                    a.msn.extend(b.msn);
+                    a
+                },
+            );
 
         out
     }
@@ -71,10 +77,10 @@ impl Runner {
 
         let database = parameters.database.clone().build(fasta);
         info!(
-            "generated {} fragments, {} peptides in {}ms",
+            "generated {} fragments, {} peptides in {:#?}",
             database.fragments.len(),
             database.peptides.len(),
-            (Instant::now() - start).as_millis()
+            (start.elapsed())
         );
         Ok(Self {
             database,
@@ -219,9 +225,13 @@ impl Runner {
                         Err(e)
                     }
                 }
-            }).flatten().collect();
+            })
+            .flatten()
+            .collect();
 
-        let msn_spectra = spectra.msn.into_par_iter()
+        let msn_spectra = spectra
+            .msn
+            .into_par_iter()
             .map(|s| sp.process(s))
             .collect::<Vec<_>>();
 
@@ -231,7 +241,11 @@ impl Runner {
         let ms1_spectra = if ms1_empty {
             MS1Spectra::Empty
         } else if all_contain_ims {
-            let spectra = spectra.ms1.into_iter().map(|x| sp.process_with_mobility(x)).collect();
+            let spectra = spectra
+                .ms1
+                .into_iter()
+                .map(|x| sp.process_with_mobility(x))
+                .collect();
             MS1Spectra::WithMobility(spectra)
         } else {
             let spectra = spectra.ms1.into_iter().map(|s| sp.process(s)).collect();

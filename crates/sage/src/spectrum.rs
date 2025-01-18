@@ -277,7 +277,7 @@ pub fn path_compression(peaks: &mut [Deisotoped]) {
     }
 }
 
-impl <T>ProcessedSpectrum<T> {
+impl<T> ProcessedSpectrum<T> {
     pub fn extract_ms1_precursor(&self) -> Option<(f32, u8)> {
         let precursor = self.precursors.first()?;
         let charge = precursor.charge?;
@@ -396,17 +396,28 @@ impl SpectrumProcessor {
     }
 
     pub fn process_with_mobility(&self, spectrum: RawSpectrum) -> ProcessedSpectrum<IMPeak> {
-        assert!(spectrum.ms_level == 1, "Logic error, mobility processing should only be used for MS1");
+        assert!(
+            spectrum.ms_level == 1,
+            "Logic error, mobility processing should only be used for MS1"
+        );
         let mut peaks = spectrum
             .mz
             .iter()
-            .zip(spectrum.intensity.iter().zip(spectrum.mobility.unwrap().iter()))
+            .zip(
+                spectrum
+                    .intensity
+                    .iter()
+                    .zip(spectrum.mobility.unwrap().iter()),
+            )
             .map(|(&mass, (&intensity, &mobility))| {
                 let mass = (mass - PROTON) * 1.0;
-                IMPeak { mass, intensity, mobility }
+                IMPeak {
+                    mass,
+                    intensity,
+                    mobility,
+                }
             })
             .collect::<Vec<_>>();
-        
 
         peaks.sort_by(|a, b| a.mass.total_cmp(&b.mass));
         let total_ion_current = peaks.iter().map(|peak| peak.intensity).sum::<f32>();

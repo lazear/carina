@@ -1,7 +1,6 @@
 use rayon::prelude::*;
-use sage_core::spectrum::{ProcessedSpectrum, MS1Spectra};
+use sage_core::spectrum::{MS1Spectra, ProcessedSpectrum};
 use sage_core::{scoring::Feature, tmt::TmtQuant};
-
 
 #[derive(Default)]
 pub struct SageResults {
@@ -32,13 +31,17 @@ impl FromParallelIterator<SageResults> for SageResults {
                     (MS1Spectra::Empty, MS1Spectra::Empty) => {
                         acc.ms1 = MS1Spectra::Empty;
                     }
-                    (MS1Spectra::Empty, MS1Spectra::WithMobility(a)) | (MS1Spectra::WithMobility(a), MS1Spectra::Empty) => {
+                    (MS1Spectra::Empty, MS1Spectra::WithMobility(a))
+                    | (MS1Spectra::WithMobility(a), MS1Spectra::Empty) => {
                         acc.ms1 = MS1Spectra::WithMobility(a);
                     }
-                    (MS1Spectra::Empty, MS1Spectra::NoMobility(a)) | (MS1Spectra::NoMobility(a), MS1Spectra::Empty) => {
+                    (MS1Spectra::Empty, MS1Spectra::NoMobility(a))
+                    | (MS1Spectra::NoMobility(a), MS1Spectra::Empty) => {
                         acc.ms1 = MS1Spectra::NoMobility(a);
                     }
-                    _ => {unreachable!()}
+                    _ => {
+                        unreachable!()
+                    }
                 };
                 acc
             })
@@ -67,13 +70,17 @@ impl FromIterator<SageResults> for SageResults {
                     (MS1Spectra::Empty, MS1Spectra::Empty) => {
                         acc.ms1 = MS1Spectra::Empty;
                     }
-                    (MS1Spectra::Empty, MS1Spectra::WithMobility(a)) | (MS1Spectra::WithMobility(a), MS1Spectra::Empty) => {
+                    (MS1Spectra::Empty, MS1Spectra::WithMobility(a))
+                    | (MS1Spectra::WithMobility(a), MS1Spectra::Empty) => {
                         acc.ms1 = MS1Spectra::WithMobility(a);
                     }
-                    (MS1Spectra::Empty, MS1Spectra::NoMobility(a)) | (MS1Spectra::NoMobility(a), MS1Spectra::Empty) => {
+                    (MS1Spectra::Empty, MS1Spectra::NoMobility(a))
+                    | (MS1Spectra::NoMobility(a), MS1Spectra::Empty) => {
                         acc.ms1 = MS1Spectra::NoMobility(a);
                     }
-                    _ => {unreachable!()}
+                    _ => {
+                        unreachable!()
+                    }
                 };
                 acc
             })
