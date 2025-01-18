@@ -43,11 +43,12 @@ pub fn read_spectra<S: AsRef<str>>(
     file_id: usize,
     sn: Option<u8>,
     bruker_processor: BrukerSpectrumProcessor,
+    requires_ms1: bool,
 ) -> Result<Vec<RawSpectrum>, Error> {
     match identify_format(path.as_ref()) {
         FileFormat::MzML => read_mzml(path, file_id, sn),
         FileFormat::MGF => read_mgf(path, file_id),
-        FileFormat::TDF => read_tdf(path, file_id, bruker_processor),
+        FileFormat::TDF => read_tdf(path, file_id, bruker_processor, requires_ms1),
         FileFormat::Unidentified => panic!("Unable to get type for '{}'", path.as_ref()), // read_mzml(path, file_id, sn),
     }
 }
@@ -69,8 +70,9 @@ pub fn read_tdf<S: AsRef<str>>(
     s: S,
     file_id: usize,
     bruker_spectrum_processor: BrukerSpectrumProcessor,
+    requires_ms1: bool,
 ) -> Result<Vec<RawSpectrum>, Error> {
-    let res = crate::tdf::TdfReader.parse(s, file_id, bruker_spectrum_processor);
+    let res = crate::tdf::TdfReader.parse(s, file_id, bruker_spectrum_processor, requires_ms1);
     match res {
         Ok(t) => Ok(t),
         Err(e) => Err(Error::TDF(e)),

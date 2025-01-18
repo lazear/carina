@@ -2,7 +2,8 @@ use crate::database::{binary_search_slice, IndexedDatabase, PeptideIx};
 use crate::mass::{composition, Composition, Tolerance, NEUTRON};
 use crate::ml::{matrix::Matrix, retention_alignment::Alignment};
 use crate::scoring::Feature;
-use crate::spectrum::ProcessedSpectrum;
+use crate::spectrum::{MS1Spectra, ProcessedSpectrum};
+use crate::spectrum;
 use dashmap::DashMap;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -68,6 +69,7 @@ pub struct PrecursorRange {
     pub rt: f32,
     pub mass_lo: f32,
     pub mass_hi: f32,
+    pub mobility: f32,
     pub charge: u8,
     pub isotope: usize,
     pub peptide: PeptideIx,
@@ -78,8 +80,8 @@ pub struct PrecursorRange {
 /// Create a data structure analogous to [`IndexedDatabase`] - instaed of
 /// storing fragment masses binned by precursor mass, store MS1 precursors
 /// binned by RT - This should enable rapid quantification as well
-pub struct FeatureMap {
-    pub ranges: Vec<PrecursorRange>,
+pub struct FeatureMap<T> {
+    pub ranges: Vec<T>,
     pub min_rts: Vec<f32>,
     pub bin_size: usize,
     pub settings: LfqSettings,
@@ -89,7 +91,7 @@ pub fn build_feature_map(
     settings: LfqSettings,
     precursor_charge: (u8, u8),
     features: &[Feature],
-) -> FeatureMap {
+) -> FeatureMap<PrecursorRange> {
     let map: DashMap<PeptideIx, PrecursorRange, fnv::FnvBuildHasher> = DashMap::default();
     features
         .iter()
@@ -112,6 +114,7 @@ pub fn build_feature_map(
                         charge: feat.charge,
                         isotope: 0,
                         file_id: feat.file_id,
+                        mobility: feat.ims,
                         decoy: false,
                     },
                 );
@@ -163,7 +166,7 @@ pub fn build_feature_map(
         .par_chunks_mut(16 * 1024)
         .map(|chunk| {
             // There should always be at least one item in the chunk!
-            //  we know the chunk is already sorted by fragment_mz too, so this is minimum value
+            //  we know the chunk is already sorted by retention time too, so this is minimum value
             let min = chunk[0].rt;
             chunk.par_sort_unstable_by(|a, b| a.mass_lo.total_cmp(&b.mass_lo));
             min
@@ -178,8 +181,8 @@ pub fn build_feature_map(
     }
 }
 
-struct Query<'a> {
-    ranges: &'a [PrecursorRange],
+struct Query<'a, T> {
+    ranges: &'a [T],
     page_lo: usize,
     page_hi: usize,
     bin_size: usize,
@@ -187,8 +190,8 @@ struct Query<'a> {
     max_rt: f32,
 }
 
-impl FeatureMap {
-    fn rt_slice(&self, rt: f32, rt_tol: f32) -> Query<'_> {
+impl <T>FeatureMap<T> {
+    fn rt_slice(&self, rt: f32, rt_tol: f32) -> Query<'_, T> {
         let (page_lo, page_hi) = binary_search_slice(
             &self.min_rts,
             |rt, x| rt.total_cmp(x),
@@ -205,50 +208,91 @@ impl FeatureMap {
             min_rt: rt - rt_tol,
         }
     }
+}
 
+impl FeatureMap<PrecursorRange> {
     /// Run label-free quantification module
     pub fn quantify(
         &self,
         db: &IndexedDatabase,
-        spectra: &[ProcessedSpectrum],
+        spectra: &MS1Spectra,
         alignments: &[Alignment],
     ) -> HashMap<(PrecursorId, bool), (Peak, Vec<f64>), fnv::FnvBuildHasher> {
         let scores: DashMap<(PrecursorId, bool), Grid, fnv::FnvBuildHasher> = DashMap::default();
 
         log::info!("tracing MS1 features");
-        spectra
-            .par_iter()
-            .filter(|s| s.level == 1)
-            .for_each(|spectrum| {
-                let a = alignments[spectrum.file_id];
-                let rt = (spectrum.scan_start_time / a.max_rt) * a.slope + a.intercept;
-                let query = self.rt_slice(rt, RT_TOL);
 
-                for peak in &spectrum.peaks {
-                    for entry in query.mass_lookup(peak.mass) {
-                        let id = match self.settings.combine_charge_states {
-                            true => PrecursorId::Combined(entry.peptide),
-                            false => PrecursorId::Charged((entry.peptide, entry.charge)),
-                        };
+        // TODO: find a good way to abstract this ... I think a macro would be the way to go.
+        match spectra {
+            MS1Spectra::NoMobility(spectra) => {
+                spectra.par_iter().for_each(|spectrum| {
+                    let a = alignments[spectrum.file_id];
+                    let rt = (spectrum.scan_start_time / a.max_rt) * a.slope + a.intercept;
+                    let query = self.rt_slice(rt, RT_TOL);
 
-                        let mut grid = scores.entry((id, entry.decoy)).or_insert_with(|| {
-                            let p = &db[entry.peptide];
-                            let composition = p
-                                .sequence
-                                .iter()
-                                .map(|r| composition(*r))
-                                .sum::<Composition>();
-                            let dist = crate::isotopes::peptide_isotopes(
-                                composition.carbon,
-                                composition.sulfur,
-                            );
-                            Grid::new(entry, RT_TOL, dist, alignments.len(), GRID_SIZE)
-                        });
+                    for peak in &spectrum.peaks {
+                        for entry in query.mass_lookup(peak.mass) {
+                            let id = match self.settings.combine_charge_states {
+                                true => PrecursorId::Combined(entry.peptide),
+                                false => PrecursorId::Charged((entry.peptide, entry.charge)),
+                            };
 
-                        grid.add_entry(rt, entry.isotope, spectrum.file_id, peak.intensity);
+                            let mut grid = scores.entry((id, entry.decoy)).or_insert_with(|| {
+                                let p = &db[entry.peptide];
+                                let composition = p
+                                    .sequence
+                                    .iter()
+                                    .map(|r| composition(*r))
+                                    .sum::<Composition>();
+                                let dist = crate::isotopes::peptide_isotopes(
+                                    composition.carbon,
+                                    composition.sulfur,
+                                );
+                                Grid::new(entry, RT_TOL, dist, alignments.len(), GRID_SIZE)
+                            });
+
+                            grid.add_entry(rt, entry.isotope, spectrum.file_id, peak.intensity);
+                        }
                     }
-                }
-            });
+            })},
+            MS1Spectra::WithMobility(spectra) => {
+                spectra.par_iter().for_each(|spectrum|{
+                    let a = alignments[spectrum.file_id];
+                    let rt = (spectrum.scan_start_time / a.max_rt) * a.slope + a.intercept;
+                    let query = self.rt_slice(rt, RT_TOL);
+
+                    for peak in &spectrum.peaks {
+                        for entry in query.mass_mobility_lookup(peak.mass, peak.mobility) {
+                            let id = match self.settings.combine_charge_states {
+                                true => PrecursorId::Combined(entry.peptide),
+                                false => PrecursorId::Charged((entry.peptide, entry.charge)),
+                            };
+
+                            let mut grid = scores.entry((id, entry.decoy)).or_insert_with(|| {
+                                let p = &db[entry.peptide];
+                                let composition = p
+                                    .sequence
+                                    .iter()
+                                    .map(|r| composition(*r))
+                                    .sum::<Composition>();
+                                let dist = crate::isotopes::peptide_isotopes(
+                                    composition.carbon,
+                                    composition.sulfur,
+                                );
+                                Grid::new(entry, RT_TOL, dist, alignments.len(), GRID_SIZE)
+                            });
+
+                            grid.add_entry(rt, entry.isotope, spectrum.file_id, peak.intensity);
+                        }
+                    }
+
+            })},
+            MS1Spectra::Empty => {
+                // Should never be called if no MS1 spectra are present
+                log::warn!("no MS1 spectra found for quantification");
+            }
+            
+        };
 
         log::info!("integrating MS1 features");
 
@@ -608,7 +652,7 @@ fn convolve(slice: &[f64], kernel: &[f64]) -> Vec<f64> {
         .collect()
 }
 
-impl<'a> Query<'a> {
+impl<'a> Query<'a, PrecursorRange> {
     pub fn mass_lookup(&self, mass: f32) -> impl Iterator<Item = &PrecursorRange> {
         (self.page_lo..self.page_hi).flat_map(move |page| {
             let left_idx = page * self.bin_size;
@@ -634,6 +678,14 @@ impl<'a> Query<'a> {
                     && mass >= frag.mass_lo
                     && mass <= frag.mass_hi
             })
+        })
+    }
+
+    pub fn mass_mobility_lookup(&self, mass: f32, mobility: f32) -> impl Iterator<Item = &PrecursorRange> {
+        self.mass_lookup(mass).filter(move |precursor| {
+            // TODO: replace this magic number with a patameter.
+            precursor.mobility >= (mobility - 0.01)
+                && precursor.mobility <= (mobility + 0.01)
         })
     }
 }
