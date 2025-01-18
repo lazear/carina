@@ -1,5 +1,5 @@
 use rayon::prelude::*;
-use sage_core::spectrum::{MS1Spectra, ProcessedSpectrum};
+use sage_core::spectrum::MS1Spectra;
 use sage_core::{scoring::Feature, tmt::TmtQuant};
 
 #[derive(Default)]

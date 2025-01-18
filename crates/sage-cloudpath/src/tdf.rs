@@ -86,10 +86,10 @@ impl TdfReader {
                             .partial_cmp(&mz[j])
                             .unwrap_or(std::cmp::Ordering::Equal)
                     });
-                    let sorted_mz: Vec<f32> = indices.iter().map(|&i| mz[i].clone()).collect();
+                    let sorted_mz: Vec<f32> = indices.iter().map(|&i| mz[i]).collect();
                     let sorted_inten: Vec<f32> =
-                        indices.iter().map(|&i| intensity[i].clone()).collect();
-                    let sorted_imss: Vec<f32> = indices.iter().map(|&i| imss[i].clone()).collect();
+                        indices.iter().map(|&i| intensity[i]).collect();
+                    let sorted_imss: Vec<f32> = indices.iter().map(|&i| imss[i]).collect();
 
                     // Squash the mobility dimension
                     let tol_ppm = 15.0;
@@ -179,14 +179,8 @@ impl TdfReader {
     fn parse_precursor(dda_precursor: timsrust::Precursor) -> Precursor {
         let mut precursor: Precursor = Precursor::default();
         precursor.mz = dda_precursor.mz as f32;
-        precursor.charge = match dda_precursor.charge {
-            Some(x) => Some(x as u8),
-            None => None,
-        };
-        precursor.intensity = match dda_precursor.intensity {
-            Some(x) => Some(x as f32),
-            None => None,
-        };
+        precursor.charge = dda_precursor.charge.map(|x| x as u8);
+        precursor.intensity = dda_precursor.intensity.map(|x| x as f32);
         precursor.spectrum_ref = Option::from(dda_precursor.frame_index.to_string());
         precursor.inverse_ion_mobility = Option::from(dda_precursor.im as f32);
         precursor
@@ -323,7 +317,7 @@ fn dumbcentroid_frame(
     let mut result: Vec<(f32, (f32, f32))> = agg_buff
         .iter()
         .filter(|&x| x.mz > 0.0 && x.intensity > 0.0)
-        .map(|x| (x.mz, (x.intensity, x.im as f32)))
+        .map(|x| (x.mz, (x.intensity, x.im)))
         .collect();
 
     result.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));

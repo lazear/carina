@@ -2,8 +2,7 @@ use crate::database::{binary_search_slice, IndexedDatabase, PeptideIx};
 use crate::mass::{composition, Composition, Tolerance, NEUTRON};
 use crate::ml::{matrix::Matrix, retention_alignment::Alignment};
 use crate::scoring::Feature;
-use crate::spectrum;
-use crate::spectrum::{MS1Spectra, ProcessedSpectrum};
+use crate::spectrum::MS1Spectra;
 use dashmap::DashMap;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -80,8 +79,8 @@ pub struct PrecursorRange {
 /// Create a data structure analogous to [`IndexedDatabase`] - instaed of
 /// storing fragment masses binned by precursor mass, store MS1 precursors
 /// binned by RT - This should enable rapid quantification as well
-pub struct FeatureMap<T> {
-    pub ranges: Vec<T>,
+pub struct FeatureMap {
+    pub ranges: Vec<PrecursorRange>,
     pub min_rts: Vec<f32>,
     pub bin_size: usize,
     pub settings: LfqSettings,
@@ -91,7 +90,7 @@ pub fn build_feature_map(
     settings: LfqSettings,
     precursor_charge: (u8, u8),
     features: &[Feature],
-) -> FeatureMap<PrecursorRange> {
+) -> FeatureMap {
     let map: DashMap<PeptideIx, PrecursorRange, fnv::FnvBuildHasher> = DashMap::default();
     features
         .iter()
@@ -181,8 +180,8 @@ pub fn build_feature_map(
     }
 }
 
-struct Query<'a, T> {
-    ranges: &'a [T],
+struct Query<'a> {
+    ranges: &'a [PrecursorRange],
     page_lo: usize,
     page_hi: usize,
     bin_size: usize,
@@ -190,8 +189,8 @@ struct Query<'a, T> {
     max_rt: f32,
 }
 
-impl<T> FeatureMap<T> {
-    fn rt_slice(&self, rt: f32, rt_tol: f32) -> Query<'_, T> {
+impl FeatureMap {
+    fn rt_slice(&self, rt: f32, rt_tol: f32) -> Query<'_> {
         let (page_lo, page_hi) = binary_search_slice(
             &self.min_rts,
             |rt, x| rt.total_cmp(x),
@@ -210,7 +209,7 @@ impl<T> FeatureMap<T> {
     }
 }
 
-impl FeatureMap<PrecursorRange> {
+impl FeatureMap {
     /// Run label-free quantification module
     pub fn quantify(
         &self,
@@ -648,7 +647,7 @@ fn convolve(slice: &[f64], kernel: &[f64]) -> Vec<f64> {
         .collect()
 }
 
-impl<'a> Query<'a, PrecursorRange> {
+impl Query<'_> {
     pub fn mass_lookup(&self, mass: f32) -> impl Iterator<Item = &PrecursorRange> {
         (self.page_lo..self.page_hi).flat_map(move |page| {
             let left_idx = page * self.bin_size;
