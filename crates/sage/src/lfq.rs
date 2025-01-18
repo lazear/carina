@@ -2,8 +2,8 @@ use crate::database::{binary_search_slice, IndexedDatabase, PeptideIx};
 use crate::mass::{composition, Composition, Tolerance, NEUTRON};
 use crate::ml::{matrix::Matrix, retention_alignment::Alignment};
 use crate::scoring::Feature;
-use crate::spectrum::{MS1Spectra, ProcessedSpectrum};
 use crate::spectrum;
+use crate::spectrum::{MS1Spectra, ProcessedSpectrum};
 use dashmap::DashMap;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -190,7 +190,7 @@ struct Query<'a, T> {
     max_rt: f32,
 }
 
-impl <T>FeatureMap<T> {
+impl<T> FeatureMap<T> {
     fn rt_slice(&self, rt: f32, rt_tol: f32) -> Query<'_, T> {
         let (page_lo, page_hi) = binary_search_slice(
             &self.min_rts,
@@ -224,74 +224,70 @@ impl FeatureMap<PrecursorRange> {
 
         // TODO: find a good way to abstract this ... I think a macro would be the way to go.
         match spectra {
-            MS1Spectra::NoMobility(spectra) => {
-                spectra.par_iter().for_each(|spectrum| {
-                    let a = alignments[spectrum.file_id];
-                    let rt = (spectrum.scan_start_time / a.max_rt) * a.slope + a.intercept;
-                    let query = self.rt_slice(rt, RT_TOL);
+            MS1Spectra::NoMobility(spectra) => spectra.par_iter().for_each(|spectrum| {
+                let a = alignments[spectrum.file_id];
+                let rt = (spectrum.scan_start_time / a.max_rt) * a.slope + a.intercept;
+                let query = self.rt_slice(rt, RT_TOL);
 
-                    for peak in &spectrum.peaks {
-                        for entry in query.mass_lookup(peak.mass) {
-                            let id = match self.settings.combine_charge_states {
-                                true => PrecursorId::Combined(entry.peptide),
-                                false => PrecursorId::Charged((entry.peptide, entry.charge)),
-                            };
+                for peak in &spectrum.peaks {
+                    for entry in query.mass_lookup(peak.mass) {
+                        let id = match self.settings.combine_charge_states {
+                            true => PrecursorId::Combined(entry.peptide),
+                            false => PrecursorId::Charged((entry.peptide, entry.charge)),
+                        };
 
-                            let mut grid = scores.entry((id, entry.decoy)).or_insert_with(|| {
-                                let p = &db[entry.peptide];
-                                let composition = p
-                                    .sequence
-                                    .iter()
-                                    .map(|r| composition(*r))
-                                    .sum::<Composition>();
-                                let dist = crate::isotopes::peptide_isotopes(
-                                    composition.carbon,
-                                    composition.sulfur,
-                                );
-                                Grid::new(entry, RT_TOL, dist, alignments.len(), GRID_SIZE)
-                            });
+                        let mut grid = scores.entry((id, entry.decoy)).or_insert_with(|| {
+                            let p = &db[entry.peptide];
+                            let composition = p
+                                .sequence
+                                .iter()
+                                .map(|r| composition(*r))
+                                .sum::<Composition>();
+                            let dist = crate::isotopes::peptide_isotopes(
+                                composition.carbon,
+                                composition.sulfur,
+                            );
+                            Grid::new(entry, RT_TOL, dist, alignments.len(), GRID_SIZE)
+                        });
 
-                            grid.add_entry(rt, entry.isotope, spectrum.file_id, peak.intensity);
-                        }
+                        grid.add_entry(rt, entry.isotope, spectrum.file_id, peak.intensity);
                     }
-            })},
-            MS1Spectra::WithMobility(spectra) => {
-                spectra.par_iter().for_each(|spectrum|{
-                    let a = alignments[spectrum.file_id];
-                    let rt = (spectrum.scan_start_time / a.max_rt) * a.slope + a.intercept;
-                    let query = self.rt_slice(rt, RT_TOL);
+                }
+            }),
+            MS1Spectra::WithMobility(spectra) => spectra.par_iter().for_each(|spectrum| {
+                let a = alignments[spectrum.file_id];
+                let rt = (spectrum.scan_start_time / a.max_rt) * a.slope + a.intercept;
+                let query = self.rt_slice(rt, RT_TOL);
 
-                    for peak in &spectrum.peaks {
-                        for entry in query.mass_mobility_lookup(peak.mass, peak.mobility) {
-                            let id = match self.settings.combine_charge_states {
-                                true => PrecursorId::Combined(entry.peptide),
-                                false => PrecursorId::Charged((entry.peptide, entry.charge)),
-                            };
+                for peak in &spectrum.peaks {
+                    for entry in query.mass_mobility_lookup(peak.mass, peak.mobility) {
+                        let id = match self.settings.combine_charge_states {
+                            true => PrecursorId::Combined(entry.peptide),
+                            false => PrecursorId::Charged((entry.peptide, entry.charge)),
+                        };
 
-                            let mut grid = scores.entry((id, entry.decoy)).or_insert_with(|| {
-                                let p = &db[entry.peptide];
-                                let composition = p
-                                    .sequence
-                                    .iter()
-                                    .map(|r| composition(*r))
-                                    .sum::<Composition>();
-                                let dist = crate::isotopes::peptide_isotopes(
-                                    composition.carbon,
-                                    composition.sulfur,
-                                );
-                                Grid::new(entry, RT_TOL, dist, alignments.len(), GRID_SIZE)
-                            });
+                        let mut grid = scores.entry((id, entry.decoy)).or_insert_with(|| {
+                            let p = &db[entry.peptide];
+                            let composition = p
+                                .sequence
+                                .iter()
+                                .map(|r| composition(*r))
+                                .sum::<Composition>();
+                            let dist = crate::isotopes::peptide_isotopes(
+                                composition.carbon,
+                                composition.sulfur,
+                            );
+                            Grid::new(entry, RT_TOL, dist, alignments.len(), GRID_SIZE)
+                        });
 
-                            grid.add_entry(rt, entry.isotope, spectrum.file_id, peak.intensity);
-                        }
+                        grid.add_entry(rt, entry.isotope, spectrum.file_id, peak.intensity);
                     }
-
-            })},
+                }
+            }),
             MS1Spectra::Empty => {
                 // Should never be called if no MS1 spectra are present
                 log::warn!("no MS1 spectra found for quantification");
             }
-            
         };
 
         log::info!("integrating MS1 features");
@@ -681,11 +677,14 @@ impl<'a> Query<'a, PrecursorRange> {
         })
     }
 
-    pub fn mass_mobility_lookup(&self, mass: f32, mobility: f32) -> impl Iterator<Item = &PrecursorRange> {
+    pub fn mass_mobility_lookup(
+        &self,
+        mass: f32,
+        mobility: f32,
+    ) -> impl Iterator<Item = &PrecursorRange> {
         self.mass_lookup(mass).filter(move |precursor| {
             // TODO: replace this magic number with a patameter.
-            precursor.mobility >= (mobility - 0.01)
-                && precursor.mobility <= (mobility + 0.01)
+            precursor.mobility >= (mobility - 0.01) && precursor.mobility <= (mobility + 0.01)
         })
     }
 }
