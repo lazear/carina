@@ -11,6 +11,7 @@ pub const NH3: f32 = 17.026548;
 #[serde(rename_all = "lowercase")]
 pub enum Tolerance {
     Ppm(f32, f32),
+    Pct(f32, f32),
     Da(f32, f32),
 }
 
@@ -22,6 +23,11 @@ impl Tolerance {
             Tolerance::Ppm(lo, hi) => {
                 let delta_lo = center * lo / 1_000_000.0;
                 let delta_hi = center * hi / 1_000_000.0;
+                (center + delta_lo, center + delta_hi)
+            }
+            Tolerance::Pct(lo, hi) => {
+                let delta_lo = center * lo / 100.0;
+                let delta_hi = center * hi / 100.0;
                 (center + delta_lo, center + delta_hi)
             }
             Tolerance::Da(lo, hi) => (center + lo, center + hi),
@@ -44,6 +50,7 @@ impl Mul<f32> for Tolerance {
     fn mul(self, rhs: f32) -> Self::Output {
         match self {
             Tolerance::Ppm(lo, hi) => Tolerance::Ppm(lo * rhs, hi * rhs),
+            Tolerance::Pct(lo, hi) => Tolerance::Pct(lo * rhs, hi * rhs),
             Tolerance::Da(lo, hi) => Tolerance::Da(lo * rhs, hi * rhs),
         }
     }

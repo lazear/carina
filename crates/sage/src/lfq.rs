@@ -48,6 +48,7 @@ pub struct LfqSettings {
     pub integration: IntegrationStrategy,
     pub spectral_angle: f64,
     pub ppm_tolerance: f32,
+    pub mobility_pct_tolerance: f32,
     pub combine_charge_states: bool,
 }
 
@@ -58,6 +59,7 @@ impl Default for LfqSettings {
             integration: IntegrationStrategy::Sum,
             spectral_angle: 0.70,
             ppm_tolerance: 5.0,
+            mobility_pct_tolerance: 1.0,
             combine_charge_states: true,
         }
     }
@@ -68,7 +70,8 @@ pub struct PrecursorRange {
     pub rt: f32,
     pub mass_lo: f32,
     pub mass_hi: f32,
-    pub mobility: f32,
+    pub mobility_lo: f32,
+    pub mobility_hi: f32,
     pub charge: u8,
     pub isotope: usize,
     pub peptide: PeptideIx,
@@ -103,6 +106,9 @@ pub fn build_feature_map(
                 // } else {
                 //     feat.calcmass
                 // };
+                let (mobility_lo, mobility_hi) =
+                        Tolerance::Pct(-settings.mobility_pct_tolerance, settings.mobility_pct_tolerance)
+                        .bounds(feat.ims);
                 map.insert(
                     feat.peptide_idx,
                     PrecursorRange {
@@ -113,7 +119,8 @@ pub fn build_feature_map(
                         charge: feat.charge,
                         isotope: 0,
                         file_id: feat.file_id,
-                        mobility: feat.ims,
+                        mobility_lo,
+                        mobility_hi,
                         decoy: false,
                     },
                 );
@@ -172,6 +179,8 @@ pub fn build_feature_map(
         })
         .collect::<Vec<_>>();
 
+    log::trace!("building feature map");
+    println!("First feature map entry: {:?}", ranges.first());
     FeatureMap {
         ranges,
         min_rts,
@@ -683,7 +692,7 @@ impl Query<'_> {
     ) -> impl Iterator<Item = &PrecursorRange> {
         self.mass_lookup(mass).filter(move |precursor| {
             // TODO: replace this magic number with a patameter.
-            precursor.mobility >= (mobility - 0.01) && precursor.mobility <= (mobility + 0.01)
+            (precursor.mobility_hi >= mobility) && (precursor.mobility_lo <= mobility)
         })
     }
 }

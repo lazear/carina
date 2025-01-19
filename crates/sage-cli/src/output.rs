@@ -40,7 +40,11 @@ impl FromParallelIterator<SageResults> for SageResults {
                         acc.ms1 = MS1Spectra::NoMobility(a);
                     }
                     _ => {
-                        unreachable!()
+                        // In theory this can happen if someone is searching
+                        // together files of different types, mixing the ones
+                        // that support IMS and the ones that dont.
+                        // ... I dont think this should be run-time recoverable.
+                        unreachable!("Found combination of MS1 spectra with and without mobility.")
                     }
                 };
                 acc
@@ -79,7 +83,7 @@ impl FromIterator<SageResults> for SageResults {
                         acc.ms1 = MS1Spectra::NoMobility(a);
                     }
                     _ => {
-                        unreachable!()
+                        unreachable!("Found combination of MS1 spectra with and without mobility.")
                     }
                 };
                 acc

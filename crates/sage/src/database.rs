@@ -192,7 +192,6 @@ impl Parameters {
         });
         target_decoys.dedup_by(|remove, keep| {
             if remove.monoisotopic == keep.monoisotopic
-            // if remove.sequence == keep.sequence
                 && remove.sequence == keep.sequence
                 && remove.modifications == keep.modifications
                 && remove.nterm == keep.nterm
@@ -209,15 +208,10 @@ impl Parameters {
             .par_iter_mut()
             .for_each(|peptide| peptide.proteins.sort_unstable());
         let num_dropped = init_size - target_decoys.len();
-        let tot_proteins = target_decoys
-            .iter()
-            .map(|x| x.proteins.len())
-            .sum::<usize>();
         log::trace!(
-            "dropped {} t/d pairs, remaining {}, tot_proteins: {}",
+            "dropped {} t/d pairs, remaining {}",
             num_dropped,
             target_decoys.len(),
-            tot_proteins
         );
 
         target_decoys
@@ -242,14 +236,14 @@ impl Parameters {
                     .flat_map(|kind| IonSeries::new(peptide, *kind).enumerate())
                     .filter(|(ion_idx, ion)| {
                         // Don't store b1, b2, y1, y2 ions for preliminary scoring
-                        let ion_idx_filter = match ion.kind {
+                        
+                        match ion.kind {
                             Kind::A | Kind::B | Kind::C => (ion_idx + 1) > self.min_ion_index,
                             Kind::X | Kind::Y | Kind::Z => {
                                 peptide.sequence.len().saturating_sub(1) - ion_idx
                                     > self.min_ion_index
                             }
-                        };
-                        ion_idx_filter
+                        }
                     })
                     .map(move |(_, ion)| Theoretical {
                         peptide_index: PeptideIx(idx as u32),
@@ -436,7 +430,7 @@ pub struct IndexedQuery<'d> {
     pub pre_idx_hi: usize,
 }
 
-impl<'d> IndexedQuery<'d> {
+impl IndexedQuery<'_> {
     /// Search for a specified `fragment_mz` within the database
     pub fn page_search(&self, fragment_mz: f32, charge: u8) -> impl Iterator<Item = &Theoretical> {
         let mass = fragment_mz * charge as f32;
@@ -445,6 +439,7 @@ impl<'d> IndexedQuery<'d> {
         // - relative tolerance needs to be proportionally decreased
         let tol = match self.fragment_tol {
             Tolerance::Ppm(lo, hi) => Tolerance::Ppm(lo / charge as f32, hi / charge as f32),
+            Tolerance::Pct(_, _) => unreachable!("Pct tolerance should never be used on mz"),
             Tolerance::Da(_, _) => self.fragment_tol,
         };
 

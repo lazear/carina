@@ -187,6 +187,17 @@ impl TdfReader {
     }
 }
 
+
+/// Centroiding of the IM-containing spectra
+///
+/// This is a very rudimentary centroiding algorithm but... it seems to work well.
+/// It iterativelty goes over the peaks in decreasing intensity order and
+/// accumulates the intensity of the peaks surrounding the peak. (sort of
+/// like the first pass in dbscan).
+/// 
+/// This dramatically reduces the number of peaks in the spectra
+/// which saves a ton of memory and time when doing LFQ, since we
+/// iterate over each peak.
 fn dumbcentroid_frame(
     mz_array: &[f32],
     intensity_array: &[f32],
@@ -195,11 +206,12 @@ fn dumbcentroid_frame(
     im_tol_pct: f32,
 ) -> (Vec<f32>, (Vec<f32>, Vec<f32>)) {
     // Make sure the mz array is sorted
-    assert!(mz_array.windows(2).all(|x| x[0] <= x[1]));
+    // In theory I could use the type system to enforce this but I dont
+    // think it is worth it, its not that slow and its simple.
+    assert!(mz_array.windows(2).all(|x| x[0] <= x[1]), "mz_array is not sorted");
 
     let arr_len = mz_array.len();
-    let mut touched = vec![false; arr_len];
-    let mut global_num_touched = 0;
+    let mut global_num_included = 0;
 
     let mut order: Vec<usize> = (0..arr_len).collect();
     order.sort_unstable_by(|&a, &b| {
@@ -208,21 +220,23 @@ fn dumbcentroid_frame(
             .unwrap_or(Ordering::Equal)
     });
 
-    #[derive(Debug, Clone, Copy, Default)]
+    #[derive(Clone, Copy)]
     struct ImsPeak {
         mz: f32,
         intensity: f32,
         im: f32,
     }
     let mut agg_buff = Vec::with_capacity(10_000.min(arr_len));
-    const TOUCH_BUFF_SIZE: usize = 1000;
-    let mut touch_buff = [false; TOUCH_BUFF_SIZE];
+    // TODO: Optimize the size of this buffer.
+    const INCLUDE_BUFF_SIZE: usize = 1000;
+    let mut included = vec![false; arr_len];
+    let mut include_buff = [false; INCLUDE_BUFF_SIZE];
 
     let utol = mz_tol_ppm / 1e6;
     let im_tol = im_tol_pct / 100.0;
 
     for &idx in &order {
-        if touched[idx] {
+        if included[idx] {
             continue;
         }
 
@@ -242,23 +256,19 @@ fn dumbcentroid_frame(
             // Here we just handle those edge cases by making sure the 'center'
             // will be aggregated.
 
-            let new_ss_start = idx.saturating_sub(TOUCH_BUFF_SIZE / 2);
-            let new_ss_end = new_ss_start + TOUCH_BUFF_SIZE - 1;
+            let new_ss_start = idx.saturating_sub(INCLUDE_BUFF_SIZE / 2);
+            let new_ss_end = new_ss_start + INCLUDE_BUFF_SIZE - 1;
             // TODO: make a better warning message here.
             log::warn!(
                 "More than {} points are in the mz range of a point, limiting span",
-                TOUCH_BUFF_SIZE
+                INCLUDE_BUFF_SIZE
             );
             ss_start = new_ss_start;
             ss_end = new_ss_end;
             slice_width = ss_end - ss_start;
         }
-        let local_num_touched = touched[ss_start..ss_end].iter().filter(|&&x| x).count();
-        let local_num_untouched = slice_width - local_num_touched;
-
-        if local_num_touched == slice_width {
-            continue;
-        }
+        let local_num_included = included[ss_start..ss_end].iter().filter(|&&x| x).count();
+        let local_num_unincluded = slice_width - local_num_included;
 
         let abs_im_tol = im * im_tol;
         let left_im = im - abs_im_tol;
@@ -266,64 +276,60 @@ fn dumbcentroid_frame(
 
         let mut curr_intensity = 0.0;
 
-        let mut num_touchable = 0;
+        let mut num_includable = 0;
         for i in ss_start..ss_end {
             let im_i = ims_array[i];
-            if !touched[i] && intensity_array[i] > 0.0 && im_i >= left_im && im_i <= right_im {
+            if !included[i] && intensity_array[i] > 0.0 && im_i >= left_im && im_i <= right_im {
                 curr_intensity += intensity_array[i];
-                num_touchable += 1;
-                touch_buff[i - ss_start] = true;
+                num_includable += 1;
+                include_buff[i - ss_start] = true;
             }
         }
 
-        if curr_intensity > 0.0 {
-            agg_buff.push(ImsPeak {
-                mz,
-                intensity: curr_intensity,
-                im,
+        agg_buff.push(ImsPeak {
+            mz,
+            intensity: curr_intensity,
+            im,
+        });
+        included[ss_start..ss_end]
+            .iter_mut()
+            .zip(include_buff.iter_mut().take(slice_width))
+            .for_each(|(t, tb)| {
+                *t = true;
+                *tb = false;
             });
-            touched[ss_start..ss_end]
-                .iter_mut()
-                .zip(touch_buff.iter_mut().take(slice_width))
-                .for_each(|(t, tb)| {
-                    *t = true;
-                    *tb = false;
-                });
-            global_num_touched += num_touchable;
-            const MAX_PEAKS: usize = 10000;
-            if agg_buff.len() > MAX_PEAKS {
-                let curr_loc_int = intensity_array[idx];
-                if curr_loc_int > 200.0 {
-                    log::debug!(
-                        "Reached limit of the agg buffer at index {}/{} curr int={}",
-                        idx,
-                        arr_len,
-                        curr_loc_int
-                    );
-                }
-                break;
+        global_num_included += num_includable;
+        const MAX_PEAKS: usize = 10000;
+        if agg_buff.len() > MAX_PEAKS {
+            let curr_loc_int = intensity_array[idx];
+            if curr_loc_int > 200.0 {
+                log::debug!(
+                    "Reached limit of the agg buffer at index {}/{} curr int={}",
+                    idx,
+                    arr_len,
+                    curr_loc_int
+                );
             }
+            break;
         }
 
-        if global_num_touched == arr_len {
+        if global_num_included == arr_len {
             break;
         }
     }
 
-    assert!(touch_buff.iter().all(|x| !x), "{:?}", touch_buff);
+    // This just makes sure that I am correctly reseting
+    // the buffer on each iteration.
+    assert!(include_buff.iter().all(|x| !x), "{:?}", include_buff);
 
-    // Drop the zeros and sort
-    // I could in theory truncate instead of filtering.
-    let mut result: Vec<(f32, (f32, f32))> = agg_buff
-        .iter()
-        .filter(|&x| x.mz > 0.0 && x.intensity > 0.0)
-        .map(|x| (x.mz, (x.intensity, x.im)))
-        .collect();
-
-    result.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+    agg_buff.sort_unstable_by(|a, b| a.mz.partial_cmp(&b.mz).unwrap());
     // println!("Centroiding: Start len: {}; end len: {};", arr_len, result.len());
     // Ultra data is usually start: 40k end 10k,
-    // HT2 data is usually start 400k end 40k
+    // HT2 data is usually start 400k end 40k, limiting to 10k
+    // rarely leaves peaks with intensity > 200 ... ive never seen
+    // it happen.
 
-    result.into_iter().unzip()
+    agg_buff.into_iter()
+        .map(|x| (x.mz, (x.intensity, x.im)))
+        .unzip()
 }
