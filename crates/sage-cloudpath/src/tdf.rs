@@ -4,7 +4,7 @@ use sage_core::{
     spectrum::{Precursor, RawSpectrum, Representation},
 };
 use std::cmp::Ordering;
-use timsrust::converters::ConvertableDomain;
+use timsrust::converters::{ConvertableDomain, Scan2ImConverter};
 use timsrust::readers::SpectrumReader;
 pub use timsrust::readers::SpectrumReaderConfig as BrukerSpectrumProcessor;
 
@@ -24,7 +24,7 @@ impl TdfReader {
             .finalize()?;
         let mut spectra = self.read_msn_spectra(file_id, &spectrum_reader)?;
         if requires_ms1 {
-            let ms1s = self.read_ms1_spectra(&path_name, file_id, &spectrum_reader)?;
+            let ms1s = self.read_ms1_spectra(&path_name, file_id)?;
             spectra.extend(ms1s);
         }
 
@@ -35,7 +35,6 @@ impl TdfReader {
         &self,
         path_name: impl AsRef<str>,
         file_id: usize,
-        spectrum_reader: &SpectrumReader,
     ) -> Result<Vec<RawSpectrum>, timsrust::TimsRustError> {
         let start = std::time::Instant::now();
         let frame_reader = timsrust::readers::FrameReader::new(path_name.as_ref())?;
@@ -53,31 +52,11 @@ impl TdfReader {
                         .iter()
                         .map(|&x| mz_converter.convert(x as f64) as f32)
                         .collect();
-                    let intensity: Vec<f32> = frame.intensities.iter().map(|&x| x as f32).collect();
-                    let mut imss: Vec<f32> = vec![0.0; mz.len()];
-                    // TODO: This is getting pretty big ... I should refactor this block.
-                    frame
-                        .scan_offsets
-                        .windows(2)
-                        .enumerate()
-                        .map(|(i, w)| {
-                            let num = w[1] - w[0];
-                            if num == 0 {
-                                return None;
-                            }
-                            let lo = w[0];
-                            let hi = w[1];
-
-                            let im = ims_converter.convert(i as f64) as f32;
-                            Some((im, lo, hi))
-                        })
-                        .for_each(|x| {
-                            if let Some((im, lo, hi)) = x {
-                                for i in lo..hi {
-                                    imss[i] = im;
-                                }
-                            }
-                        });
+                    let corr_factor = frame.intensity_correction_factor as f32;
+                    let intensity: Vec<f32> = frame.intensities.iter().map(|&x| x as f32 * corr_factor).collect();
+                    let imss = Self::expand_mobility(&frame.scan_offsets, &ims_converter);
+                    assert_eq!(mz.len(), intensity.len(), "{:?}", frame);
+                    assert_eq!(mz.len(), imss.len(), "{:?}", frame);
 
                     // Sort the mzs and intensities by mz
                     let mut indices: Vec<usize> = (0..mz.len()).collect();
@@ -103,7 +82,7 @@ impl TdfReader {
                             im_tol_pct,
                         );
 
-                    let scan_start_time = frame.rt as f32 / 60.0;
+                    let scan_start_time = frame.rt_in_seconds as f32 / 60.0;
                     let ion_injection_time = 100.0; // This is made up, in theory we can read
                                                     // if from the tdf file
                     let total_ion_current = sorted_inten.iter().sum::<f32>();
@@ -184,6 +163,37 @@ impl TdfReader {
         precursor.spectrum_ref = Option::from(dda_precursor.frame_index.to_string());
         precursor.inverse_ion_mobility = Option::from(dda_precursor.im as f32);
         precursor
+    }
+
+    fn expand_mobility(scan_offsets: &[usize], ims_converter: &Scan2ImConverter) -> Vec<f32> {
+        let capacity = match scan_offsets.last() {
+            Some(&x) => x,
+            None => return vec![],
+        };
+        let mut imss: Vec<f32> = vec![0.0; capacity];
+        // TODO: This is getting pretty big ... I should refactor this block.
+        scan_offsets
+            .windows(2)
+            .enumerate()
+            .map(|(i, w)| {
+                let num = w[1] - w[0];
+                if num == 0 {
+                    return None;
+                }
+                let lo = w[0];
+                let hi = w[1];
+
+                let im = ims_converter.convert(i as f64) as f32;
+                Some((im, lo, hi))
+            })
+            .for_each(|x| {
+                if let Some((im, lo, hi)) = x {
+                    for i in lo..hi {
+                        imss[i] = im;
+                    }
+                }
+            });
+        imss
     }
 }
 
@@ -267,8 +277,6 @@ fn dumbcentroid_frame(
             ss_end = new_ss_end;
             slice_width = ss_end - ss_start;
         }
-        let local_num_included = included[ss_start..ss_end].iter().filter(|&&x| x).count();
-        let local_num_unincluded = slice_width - local_num_included;
 
         let abs_im_tol = im * im_tol;
         let left_im = im - abs_im_tol;
