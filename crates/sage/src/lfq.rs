@@ -180,7 +180,6 @@ pub fn build_feature_map(
         .collect::<Vec<_>>();
 
     log::trace!("building feature map");
-    println!("First feature map entry: {:?}", ranges.first());
     FeatureMap {
         ranges,
         min_rts,
