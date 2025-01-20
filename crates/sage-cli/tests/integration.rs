@@ -1,6 +1,6 @@
 use sage_core::database::Builder;
 use sage_core::mass::Tolerance;
-use sage_core::scoring::{Scorer, ScoreType};
+use sage_core::scoring::{ScoreType, Scorer};
 use sage_core::spectrum::SpectrumProcessor;
 
 #[test]

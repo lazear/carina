@@ -24,6 +24,31 @@ impl Ord for Peak {
     }
 }
 
+/// A charge-less peak at monoisotopic mass with ion mobility
+#[derive(PartialEq, Copy, Clone, Default, Debug)]
+pub struct IMPeak {
+    pub intensity: f32,
+    pub mass: f32,
+    pub mobility: f32, // I would use f16 but its not stable
+}
+
+impl Eq for IMPeak {}
+
+impl PartialOrd for IMPeak {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for IMPeak {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.intensity
+            .total_cmp(&other.intensity)
+            .then_with(|| self.mass.total_cmp(&other.mass))
+            .then_with(|| self.mobility.total_cmp(&other.mobility))
+    }
+}
+
 /// A de-isotoped peak, that might have some charge state information
 #[derive(PartialEq, PartialOrd, Debug, Copy, Clone)]
 pub struct Deisotoped {
@@ -55,7 +80,7 @@ pub struct Precursor {
 }
 
 #[derive(Clone, Default, Debug)]
-pub struct ProcessedSpectrum {
+pub struct ProcessedSpectrum<T> {
     /// MSn level
     pub level: u8,
     /// Scan ID
@@ -69,7 +94,7 @@ pub struct ProcessedSpectrum {
     /// Selected ions for precursors, if `level > 1`
     pub precursors: Vec<Precursor>,
     /// MS peaks, sorted by mass in ascending order
-    pub peaks: Vec<Peak>,
+    pub peaks: Vec<T>,
     /// Total ion current
     pub total_ion_current: f32,
 }
@@ -97,6 +122,8 @@ pub struct RawSpectrum {
     pub mz: Vec<f32>,
     /// Intensity array
     pub intensity: Vec<f32>,
+    /// Mobility array
+    pub mobility: Option<Vec<f32>>,
 }
 
 impl RawSpectrum {
@@ -119,6 +146,18 @@ pub enum Representation {
 impl Default for Representation {
     fn default() -> Self {
         Self::Profile
+    }
+}
+
+pub enum MS1Spectra {
+    NoMobility(Vec<ProcessedSpectrum<Peak>>),
+    WithMobility(Vec<ProcessedSpectrum<IMPeak>>),
+    Empty,
+}
+
+impl Default for MS1Spectra {
+    fn default() -> Self {
+        Self::Empty
     }
 }
 
@@ -237,14 +276,13 @@ pub fn path_compression(peaks: &mut [Deisotoped]) {
     }
 }
 
-impl ProcessedSpectrum {
+impl<T> ProcessedSpectrum<T> {
     pub fn extract_ms1_precursor(&self) -> Option<(f32, u8)> {
         let precursor = self.precursors.first()?;
         let charge = precursor.charge?;
         let mass = (precursor.mz - PROTON) * charge as f32;
         Some((mass, charge))
     }
-
     pub fn in_isolation_window(&self, mz: f32) -> Option<bool> {
         let precursor = self.precursors.first()?;
         let (lo, hi) = precursor.isolation_window?.bounds(precursor.mz - PROTON);
@@ -327,7 +365,7 @@ impl SpectrumProcessor {
         }
     }
 
-    pub fn process(&self, spectrum: RawSpectrum) -> ProcessedSpectrum {
+    pub fn process(&self, spectrum: RawSpectrum) -> ProcessedSpectrum<Peak> {
         let mut peaks = match spectrum.ms_level {
             2 => self.process_ms2(self.deisotope, &spectrum),
             _ => spectrum
@@ -340,6 +378,45 @@ impl SpectrumProcessor {
                 })
                 .collect::<Vec<_>>(),
         };
+
+        peaks.sort_by(|a, b| a.mass.total_cmp(&b.mass));
+        let total_ion_current = peaks.iter().map(|peak| peak.intensity).sum::<f32>();
+
+        ProcessedSpectrum {
+            level: spectrum.ms_level,
+            id: spectrum.id,
+            file_id: spectrum.file_id,
+            scan_start_time: spectrum.scan_start_time,
+            ion_injection_time: spectrum.ion_injection_time,
+            precursors: spectrum.precursors,
+            peaks,
+            total_ion_current,
+        }
+    }
+
+    pub fn process_with_mobility(&self, spectrum: RawSpectrum) -> ProcessedSpectrum<IMPeak> {
+        assert!(
+            spectrum.ms_level == 1,
+            "Logic error, mobility processing should only be used for MS1"
+        );
+        let mut peaks = spectrum
+            .mz
+            .iter()
+            .zip(
+                spectrum
+                    .intensity
+                    .iter()
+                    .zip(spectrum.mobility.unwrap().iter()),
+            )
+            .map(|(&mass, (&intensity, &mobility))| {
+                let mass = (mass - PROTON) * 1.0;
+                IMPeak {
+                    mass,
+                    intensity,
+                    mobility,
+                }
+            })
+            .collect::<Vec<_>>();
 
         peaks.sort_by(|a, b| a.mass.total_cmp(&b.mass));
         let total_ion_current = peaks.iter().map(|peak| peak.intensity).sum::<f32>();

@@ -183,7 +183,7 @@ pub struct Quant<'ms3> {
     /// Quanitified TMT reporter ion intensities
     pub intensities: Vec<Option<&'ms3 Peak>>,
     /// MS3 spectrum
-    pub spectrum: &'ms3 ProcessedSpectrum,
+    pub spectrum: &'ms3 ProcessedSpectrum<Peak>,
 }
 
 /// Return a vector containing the peaks closest to the m/zs defined in
@@ -305,7 +305,7 @@ pub struct TmtQuant {
 /// * `isobaric_tolerance`: specify label tolerance
 /// * `level`: MSn level to extract isobaric peaks from
 pub fn quantify(
-    spectra: &[ProcessedSpectrum],
+    spectra: &[ProcessedSpectrum<Peak>],
     isobaric_labels: &Isobaric,
     isobaric_tolerance: Tolerance,
     level: u8,

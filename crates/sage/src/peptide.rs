@@ -3,7 +3,7 @@ use std::{collections::HashMap, fmt::Debug, sync::Arc};
 
 use crate::modification::ModificationSpecificity;
 use crate::{
-    enzyme::{Digest, Position},
+    enzyme::{Digest, DigestGroup, Position},
     mass::{monoisotopic, H2O},
 };
 use fnv::FnvHashSet;
@@ -27,7 +27,7 @@ pub struct Peptide {
     /// Where is this peptide located in the protein?
     pub position: Position,
 
-    pub proteins: Vec<Arc<String>>,
+    pub proteins: Vec<Arc<str>>,
 }
 
 impl Peptide {
@@ -342,6 +342,16 @@ enum Site {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PeptideError {
     InvalidSequence(String),
+}
+
+impl TryFrom<DigestGroup> for Peptide {
+    type Error = PeptideError;
+
+    fn try_from(value: DigestGroup) -> Result<Self, Self::Error> {
+        let mut pep = Peptide::try_from(value.reference)?;
+        pep.proteins = value.proteins;
+        Ok(pep)
+    }
 }
 
 impl TryFrom<Digest> for Peptide {

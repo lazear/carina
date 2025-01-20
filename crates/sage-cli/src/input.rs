@@ -80,6 +80,7 @@ pub struct LfqOptions {
     pub integration: Option<sage_core::lfq::IntegrationStrategy>,
     pub spectral_angle: Option<f64>,
     pub ppm_tolerance: Option<f32>,
+    pub mobility_pct_tolerance: Option<f32>,
     pub combine_charge_states: Option<bool>,
 }
 
@@ -91,12 +92,19 @@ impl From<LfqOptions> for LfqSettings {
             integration: value.integration.unwrap_or(default.integration),
             spectral_angle: value.spectral_angle.unwrap_or(default.spectral_angle).abs(),
             ppm_tolerance: value.ppm_tolerance.unwrap_or(default.ppm_tolerance).abs(),
+            mobility_pct_tolerance: value.mobility_pct_tolerance.unwrap_or(default.mobility_pct_tolerance),
             combine_charge_states: value
                 .combine_charge_states
                 .unwrap_or(default.combine_charge_states),
         };
         if settings.ppm_tolerance > 20.0 {
             log::warn!("lfq_settings.ppm_tolerance is higher than expected");
+        }
+        if settings.mobility_pct_tolerance > 4.0 {
+            log::warn!("lfq_settings.mobility_pct_tolerance is higher than expected");
+        }
+        if settings.mobility_pct_tolerance < 0.05 {
+            log::warn!("lfq_settings.mobility_pct_tolerance is smaller than expected");
         }
         if settings.spectral_angle < 0.50 {
             log::warn!("lfq_settings.spectral_angle is lower than expected");
@@ -221,6 +229,7 @@ impl Input {
     fn check_tolerances(tolerance: &Tolerance) {
         let (lo, hi) = match tolerance {
             Tolerance::Ppm(lo, hi) => (*lo, *hi),
+            Tolerance::Pct(_, _) => unreachable!("Pct tolerance should never be used on mz"),
             Tolerance::Da(lo, hi) => (*lo, *hi),
         };
         if hi.abs() > lo.abs() {

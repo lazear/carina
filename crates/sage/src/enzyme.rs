@@ -18,11 +18,47 @@ pub struct Digest {
     /// Cleaved peptide sequence
     pub sequence: String,
     /// Protein accession
-    pub protein: Arc<String>,
+    pub protein: Arc<str>,
     /// Missed cleavages
     pub missed_cleavages: u8,
     /// Is this an N-terminal peptide of the protein?
     pub position: Position,
+}
+
+pub struct DigestGroup {
+    pub reference: Digest,
+    pub proteins: Vec<Arc<str>>,
+}
+
+pub fn group_digests(mut digests: Vec<Digest>) -> Vec<DigestGroup> {
+    let mut groups = Vec::new();
+    digests.sort_unstable_by(|a, b| {
+        a.position
+            .cmp(&b.position)
+            .then(a.decoy.cmp(&b.decoy))
+            .then(a.sequence.cmp(&b.sequence))
+    });
+    let mut curr_group = DigestGroup {
+        reference: digests[0].clone(),
+        proteins: Vec::new(),
+    };
+    for digest in digests {
+        if digest.decoy == curr_group.reference.decoy
+            && digest.position == curr_group.reference.position
+            && digest.sequence == curr_group.reference.sequence
+        {
+            curr_group.proteins.push(digest.protein);
+        } else {
+            curr_group.proteins.sort_unstable();
+            groups.push(curr_group);
+            curr_group = DigestGroup {
+                reference: digest.clone(),
+                proteins: vec![digest.protein],
+            };
+        }
+    }
+    groups.push(curr_group);
+    groups
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
@@ -255,7 +291,7 @@ impl EnzymeParameters {
         sites.to_vec()
     }
 
-    pub fn digest(&self, sequence: &str, protein: Arc<String>) -> Vec<Digest> {
+    pub fn digest(&self, sequence: &str, protein: Arc<str>) -> Vec<Digest> {
         let n = sequence.len();
         let mut digests = Vec::new();
         let mut sites = self.cleavage_sites(sequence);
@@ -329,7 +365,7 @@ mod test {
                 sequence: "MADEEK".into(),
                 missed_cleavages: 0,
                 position: Position::Nterm,
-                protein: Arc::new(String::default()),
+                protein: Arc::from(String::default()),
             },
             Digest {
                 decoy: false,
@@ -337,7 +373,7 @@ mod test {
                 sequence: "MADEEK".into(),
                 missed_cleavages: 0,
                 position: Position::Nterm,
-                protein: Arc::new(String::default()),
+                protein: Arc::from(String::default()),
             },
         ];
 
@@ -352,7 +388,7 @@ mod test {
                 sequence: "MADEEK".into(),
                 missed_cleavages: 0,
                 position: Position::Nterm,
-                protein: Arc::new(String::default()),
+                protein: Arc::from(String::default()),
             },
             Digest {
                 decoy: false,
@@ -360,7 +396,7 @@ mod test {
                 sequence: "MADEEK".into(),
                 missed_cleavages: 0,
                 position: Position::Internal,
-                protein: Arc::new(String::default()),
+                protein: Arc::from(String::default()),
             },
         ];
 
