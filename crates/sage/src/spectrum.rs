@@ -1,6 +1,5 @@
 use crate::database::binary_search_slice;
 use crate::mass::{Tolerance, NEUTRON, PROTON};
-use crate::spectrum;
 
 /// A charge-less peak at monoisotopic mass
 #[derive(PartialEq, Copy, Clone, Default, Debug)]

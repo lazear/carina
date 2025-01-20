@@ -58,7 +58,7 @@ impl TdfReader {
                     assert_eq!(mz.len(), intensity.len(), "{:?}", frame);
                     assert_eq!(mz.len(), imss.len(), "{:?}", frame);
 
-                    // Sort the mzs and intensities by mz
+                    // Sort the mzs, imss and intensities by mz
                     let mut indices: Vec<usize> = (0..mz.len()).collect();
                     indices.sort_by(|&i, &j| {
                         mz[i]
@@ -75,9 +75,9 @@ impl TdfReader {
                     let im_tol_pct = 2.0;
                     let (mz, (intensity, mobility)): (Vec<f32>, (Vec<f32>, Vec<f32>)) =
                         dumbcentroid_frame(
-                            &sorted_mz,
-                            &sorted_inten,
-                            &sorted_imss,
+                            sorted_mz,
+                            sorted_inten,
+                            sorted_imss,
                             tol_ppm,
                             im_tol_pct,
                         );
@@ -85,7 +85,7 @@ impl TdfReader {
                     let scan_start_time = frame.rt_in_seconds as f32 / 60.0;
                     let ion_injection_time = 100.0; // This is made up, in theory we can read
                                                     // if from the tdf file
-                    let total_ion_current = sorted_inten.iter().sum::<f32>();
+                    let total_ion_current = intensity.iter().sum::<f32>();
                     let id = frame.index.to_string();
 
                     let spec = RawSpectrum {
@@ -209,9 +209,9 @@ impl TdfReader {
 /// which saves a ton of memory and time when doing LFQ, since we
 /// iterate over each peak.
 fn dumbcentroid_frame(
-    mz_array: &[f32],
-    intensity_array: &[f32],
-    ims_array: &[f32],
+    mz_array: Vec<f32>,
+    mut intensity_array: Vec<f32>,
+    ims_array: Vec<f32>,
     mz_tol_ppm: f32,
     im_tol_pct: f32,
 ) -> (Vec<f32>, (Vec<f32>, Vec<f32>)) {
@@ -236,78 +236,20 @@ fn dumbcentroid_frame(
         intensity: f32,
         im: f32,
     }
-    let mut agg_buff = Vec::with_capacity(10_000.min(arr_len));
-    // TODO: Optimize the size of this buffer.
-    const INCLUDE_BUFF_SIZE: usize = 1000;
-    let mut included = vec![false; arr_len];
-    let mut include_buff = [false; INCLUDE_BUFF_SIZE];
+    const MAX_PEAKS: usize = 10_000;
+    let mut agg_buff = Vec::with_capacity(MAX_PEAKS.min(arr_len));
 
     let utol = mz_tol_ppm / 1e6;
     let im_tol = im_tol_pct / 100.0;
 
     for &idx in &order {
-        if included[idx] {
+        if intensity_array[idx] <= 0.0 {
+            // In theory ... if I set the intensity as mutable
+            // I could remove the use of the 'included' vector
+            // and just set to -1.0 the intensity of the peaks
+            // I have already included.
             continue;
         }
-
-        let mz = mz_array[idx];
-        let im = ims_array[idx];
-        let da_tol = mz * utol;
-        let left_e = mz - da_tol;
-        let right_e = mz + da_tol;
-
-        let mut ss_start = mz_array.partition_point(|&x| x < left_e);
-        let mut ss_end = mz_array.partition_point(|&x| x <= right_e);
-
-        let mut slice_width = ss_end - ss_start;
-        if slice_width >= 1000 {
-            // It is EXCEEDINGLY UNLIKELY that more than 1000 points
-            // will be aggregated or in the range of a single mz peak.
-            // Here we just handle those edge cases by making sure the 'center'
-            // will be aggregated.
-
-            let new_ss_start = idx.saturating_sub(INCLUDE_BUFF_SIZE / 2);
-            let new_ss_end = new_ss_start + INCLUDE_BUFF_SIZE - 1;
-            // TODO: make a better warning message here.
-            log::warn!(
-                "More than {} points are in the mz range of a point, limiting span",
-                INCLUDE_BUFF_SIZE
-            );
-            ss_start = new_ss_start;
-            ss_end = new_ss_end;
-            slice_width = ss_end - ss_start;
-        }
-
-        let abs_im_tol = im * im_tol;
-        let left_im = im - abs_im_tol;
-        let right_im = im + abs_im_tol;
-
-        let mut curr_intensity = 0.0;
-
-        let mut num_includable = 0;
-        for i in ss_start..ss_end {
-            let im_i = ims_array[i];
-            if !included[i] && intensity_array[i] > 0.0 && im_i >= left_im && im_i <= right_im {
-                curr_intensity += intensity_array[i];
-                num_includable += 1;
-                include_buff[i - ss_start] = true;
-            }
-        }
-
-        agg_buff.push(ImsPeak {
-            mz,
-            intensity: curr_intensity,
-            im,
-        });
-        included[ss_start..ss_end]
-            .iter_mut()
-            .zip(include_buff.iter_mut().take(slice_width))
-            .for_each(|(t, tb)| {
-                *t = true;
-                *tb = false;
-            });
-        global_num_included += num_includable;
-        const MAX_PEAKS: usize = 10000;
         if agg_buff.len() > MAX_PEAKS {
             let curr_loc_int = intensity_array[idx];
             if curr_loc_int > 200.0 {
@@ -321,21 +263,51 @@ fn dumbcentroid_frame(
             break;
         }
 
+        let mz = mz_array[idx];
+        let im = ims_array[idx];
+        let da_tol = mz * utol;
+        let left_e = mz - da_tol;
+        let right_e = mz + da_tol;
+
+        let ss_start = mz_array.partition_point(|&x| x < left_e);
+        let ss_end = mz_array.partition_point(|&x| x <= right_e);
+
+        let abs_im_tol = im * im_tol;
+        let left_im = im - abs_im_tol;
+        let right_im = im + abs_im_tol;
+
+        let mut curr_intensity = 0.0;
+
+        let mut num_includable = 0;
+        for i in ss_start..ss_end {
+            let im_i = ims_array[i];
+            if (intensity_array[i] > 0.0) && im_i >= left_im && im_i <= right_im {
+                curr_intensity += intensity_array[i];
+                intensity_array[i] = -1.0;
+                num_includable += 1;
+            }
+        }
+
+        assert!(num_includable > 0, "At least 'itself' should be included");
+
+        agg_buff.push(ImsPeak {
+            mz,
+            intensity: curr_intensity,
+            im,
+        });
+        global_num_included += num_includable;
+
         if global_num_included == arr_len {
             break;
         }
     }
-
-    // This just makes sure that I am correctly reseting
-    // the buffer on each iteration.
-    assert!(include_buff.iter().all(|x| !x), "{:?}", include_buff);
 
     agg_buff.sort_unstable_by(|a, b| a.mz.partial_cmp(&b.mz).unwrap());
     // println!("Centroiding: Start len: {}; end len: {};", arr_len, result.len());
     // Ultra data is usually start: 40k end 10k,
     // HT2 data is usually start 400k end 40k, limiting to 10k
     // rarely leaves peaks with intensity > 200 ... ive never seen
-    // it happen.
+    // it happen. -JSP 2025-Jan
 
     agg_buff.into_iter()
         .map(|x| (x.mz, (x.intensity, x.im)))
