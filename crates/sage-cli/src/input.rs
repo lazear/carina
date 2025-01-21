@@ -92,7 +92,9 @@ impl From<LfqOptions> for LfqSettings {
             integration: value.integration.unwrap_or(default.integration),
             spectral_angle: value.spectral_angle.unwrap_or(default.spectral_angle).abs(),
             ppm_tolerance: value.ppm_tolerance.unwrap_or(default.ppm_tolerance).abs(),
-            mobility_pct_tolerance: value.mobility_pct_tolerance.unwrap_or(default.mobility_pct_tolerance),
+            mobility_pct_tolerance: value
+                .mobility_pct_tolerance
+                .unwrap_or(default.mobility_pct_tolerance),
             combine_charge_states: value
                 .combine_charge_states
                 .unwrap_or(default.combine_charge_states),

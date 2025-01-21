@@ -53,7 +53,11 @@ impl TdfReader {
                         .map(|&x| mz_converter.convert(x as f64) as f32)
                         .collect();
                     let corr_factor = frame.intensity_correction_factor as f32;
-                    let intensity: Vec<f32> = frame.intensities.iter().map(|&x| x as f32 * corr_factor).collect();
+                    let intensity: Vec<f32> = frame
+                        .intensities
+                        .iter()
+                        .map(|&x| x as f32 * corr_factor)
+                        .collect();
                     let imss = Self::expand_mobility(&frame.scan_offsets, &ims_converter);
                     assert_eq!(mz.len(), intensity.len(), "{:?}", frame);
                     assert_eq!(mz.len(), imss.len(), "{:?}", frame);
@@ -66,8 +70,7 @@ impl TdfReader {
                             .unwrap_or(std::cmp::Ordering::Equal)
                     });
                     let sorted_mz: Vec<f32> = indices.iter().map(|&i| mz[i]).collect();
-                    let sorted_inten: Vec<f32> =
-                        indices.iter().map(|&i| intensity[i]).collect();
+                    let sorted_inten: Vec<f32> = indices.iter().map(|&i| intensity[i]).collect();
                     let sorted_imss: Vec<f32> = indices.iter().map(|&i| imss[i]).collect();
 
                     // Squash the mobility dimension
@@ -197,14 +200,13 @@ impl TdfReader {
     }
 }
 
-
 /// Centroiding of the IM-containing spectra
 ///
 /// This is a very rudimentary centroiding algorithm but... it seems to work well.
 /// It iterativelty goes over the peaks in decreasing intensity order and
 /// accumulates the intensity of the peaks surrounding the peak. (sort of
 /// like the first pass in dbscan).
-/// 
+///
 /// This dramatically reduces the number of peaks in the spectra
 /// which saves a ton of memory and time when doing LFQ, since we
 /// iterate over each peak.
@@ -218,7 +220,10 @@ fn dumbcentroid_frame(
     // Make sure the mz array is sorted
     // In theory I could use the type system to enforce this but I dont
     // think it is worth it, its not that slow and its simple.
-    assert!(mz_array.windows(2).all(|x| x[0] <= x[1]), "mz_array is not sorted");
+    assert!(
+        mz_array.windows(2).all(|x| x[0] <= x[1]),
+        "mz_array is not sorted"
+    );
 
     let arr_len = mz_array.len();
     let mut global_num_included = 0;
@@ -309,7 +314,8 @@ fn dumbcentroid_frame(
     // rarely leaves peaks with intensity > 200 ... ive never seen
     // it happen. -JSP 2025-Jan
 
-    agg_buff.into_iter()
+    agg_buff
+        .into_iter()
         .map(|x| (x.mz, (x.intensity, x.im)))
         .unzip()
 }

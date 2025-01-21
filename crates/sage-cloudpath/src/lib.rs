@@ -10,6 +10,7 @@ pub mod mgf;
 pub mod mzml;
 pub mod tdf;
 pub mod util;
+pub use util::FileFormat;
 
 #[cfg(feature = "parquet")]
 pub mod parquet;

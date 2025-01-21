@@ -5,7 +5,7 @@ use anyhow::Context;
 use csv::ByteRecord;
 use log::info;
 use rayon::prelude::*;
-use sage_cloudpath::CloudPath;
+use sage_cloudpath::{CloudPath, FileFormat};
 use sage_core::database::IndexedDatabase;
 use sage_core::ion_series::Kind;
 use sage_core::lfq::{Peak, PrecursorId};
@@ -29,6 +29,23 @@ struct RawSpectrumAccumulator {
     pub msn: Vec<RawSpectrum>,
 }
 
+impl RawSpectrumAccumulator {
+    pub fn fold_op(mut self, rhs: RawSpectrum) -> Self {
+        if rhs.ms_level == 1 {
+            self.ms1.push(rhs);
+        } else {
+            self.msn.push(rhs);
+        }
+        self
+    }
+
+    pub fn reduce(mut self, other: Self) -> Self {
+        self.ms1.extend(other.ms1);
+        self.msn.extend(other.msn);
+        self
+    }
+}
+
 impl FromParallelIterator<RawSpectrum> for RawSpectrumAccumulator {
     fn from_par_iter<I>(par_iter: I) -> Self
     where
@@ -40,23 +57,24 @@ impl FromParallelIterator<RawSpectrum> for RawSpectrumAccumulator {
             .into_par_iter()
             .fold(
                 RawSpectrumAccumulator::default,
-                |mut accum, spectrum| {
-                    if spectrum.ms_level == 1 {
-                        accum.ms1.push(spectrum);
-                    } else {
-                        accum.msn.push(spectrum);
-                    }
-                    accum
-                },
+                RawSpectrumAccumulator::fold_op,
             )
             .reduce(
                 RawSpectrumAccumulator::default,
-                |mut a, b| {
-                    a.ms1.extend(b.ms1);
-                    a.msn.extend(b.msn);
-                    a
-                },
+                RawSpectrumAccumulator::reduce,
             )
+    }
+}
+
+impl FromIterator<RawSpectrum> for RawSpectrumAccumulator {
+    fn from_iter<I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = RawSpectrum>,
+    {
+        iter.into_iter().fold(
+            RawSpectrumAccumulator::default(),
+            RawSpectrumAccumulator::fold_op,
+        )
     }
 }
 
@@ -202,32 +220,50 @@ impl Runner {
             min_deisotope_mz.unwrap_or(0.0),
         );
 
-        let spectra: RawSpectrumAccumulator = chunk
-            .par_iter()
-            .enumerate()
-            .flat_map(|(idx, path)| {
-                let file_id = chunk_idx * batch_size + idx;
-                let res = sage_cloudpath::util::read_spectra(
-                    path,
-                    file_id,
-                    sn,
-                    self.parameters.bruker_spectrum_processor,
-                    self.requires_ms1(),
-                );
+        // If the file format supports parallel reading, then we can read
+        // then it is faster to read each file in series. (since each spectra
+        // will be processed internally in parallel).
+        let file_serial_read = chunk
+            .iter()
+            .all(|path| FileFormat::from(path.as_ref()).within_file_parallel());
+        log::trace!("file serial read: {}", file_serial_read);
+        let inner_closure = |(idx, path)| {
+            let file_id = chunk_idx * batch_size + idx;
+            let res = sage_cloudpath::util::read_spectra(
+                path,
+                file_id,
+                sn,
+                self.parameters.bruker_spectrum_processor,
+                self.requires_ms1(),
+            );
 
-                match res {
-                    Ok(s) => {
-                        log::trace!("- {}: read {} spectra", path, s.len());
-                        Ok(s)
-                    }
-                    Err(e) => {
-                        log::error!("- {}: {}", path, e);
-                        Err(e)
-                    }
+            match res {
+                Ok(s) => {
+                    log::trace!("- {}: read {} spectra", path, s.len());
+                    Ok(s)
                 }
-            })
-            .flatten()
-            .collect();
+                Err(e) => {
+                    log::error!("- {}: {}", path, e);
+                    Err(e)
+                }
+            }
+        };
+
+        let spectra: RawSpectrumAccumulator = if file_serial_read {
+            chunk
+                .iter()
+                .enumerate()
+                .flat_map(inner_closure)
+                .flatten()
+                .collect()
+        } else {
+            chunk
+                .par_iter()
+                .enumerate()
+                .flat_map(inner_closure)
+                .flatten()
+                .collect()
+        };
 
         let msn_spectra = spectra
             .msn
@@ -235,6 +271,8 @@ impl Runner {
             .map(|s| sp.process(s))
             .collect::<Vec<_>>();
 
+        // If all the MS1 spectra contain IMS, then we can process them
+        // we use the IMS! otherwise we dont.
         // Note: Empty iterators return true.
         let all_contain_ims = spectra.ms1.iter().all(|x| x.mobility.is_some());
         let ms1_empty = spectra.ms1.is_empty();
@@ -724,9 +762,11 @@ impl Runner {
         );
         record.push_field(
             itoa::Buffer::new()
-                .format(
-                    if feature.charge < 2 || feature.charge > 6 { feature.charge } else { 0 },
-                )
+                .format(if feature.charge < 2 || feature.charge > 6 {
+                    feature.charge
+                } else {
+                    0
+                })
                 .as_bytes(),
         );
         record.push_field(itoa::Buffer::new().format(feature.peptide_len).as_bytes());

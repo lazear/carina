@@ -106,9 +106,11 @@ pub fn build_feature_map(
                 // } else {
                 //     feat.calcmass
                 // };
-                let (mobility_lo, mobility_hi) =
-                        Tolerance::Pct(-settings.mobility_pct_tolerance, settings.mobility_pct_tolerance)
-                        .bounds(feat.ims);
+                let (mobility_lo, mobility_hi) = Tolerance::Pct(
+                    -settings.mobility_pct_tolerance,
+                    settings.mobility_pct_tolerance,
+                )
+                .bounds(feat.ims);
                 map.insert(
                     feat.peptide_idx,
                     PrecursorRange {

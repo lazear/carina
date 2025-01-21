@@ -236,7 +236,7 @@ impl Parameters {
                     .flat_map(|kind| IonSeries::new(peptide, *kind).enumerate())
                     .filter(|(ion_idx, ion)| {
                         // Don't store b1, b2, y1, y2 ions for preliminary scoring
-                        
+
                         match ion.kind {
                             Kind::A | Kind::B | Kind::C => (ion_idx + 1) > self.min_ion_index,
                             Kind::X | Kind::Y | Kind::Z => {
