@@ -2,7 +2,7 @@ use crate::database::{binary_search_slice, IndexedDatabase, PeptideIx};
 use crate::mass::{composition, Composition, Tolerance, NEUTRON};
 use crate::ml::{matrix::Matrix, retention_alignment::Alignment};
 use crate::scoring::Feature;
-use crate::spectrum::ProcessedSpectrum;
+use crate::spectrum::MS1Spectra;
 use dashmap::DashMap;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -48,6 +48,7 @@ pub struct LfqSettings {
     pub integration: IntegrationStrategy,
     pub spectral_angle: f64,
     pub ppm_tolerance: f32,
+    pub mobility_pct_tolerance: f32,
     pub combine_charge_states: bool,
 }
 
@@ -58,6 +59,7 @@ impl Default for LfqSettings {
             integration: IntegrationStrategy::Sum,
             spectral_angle: 0.70,
             ppm_tolerance: 5.0,
+            mobility_pct_tolerance: 1.0,
             combine_charge_states: true,
         }
     }
@@ -68,6 +70,8 @@ pub struct PrecursorRange {
     pub rt: f32,
     pub mass_lo: f32,
     pub mass_hi: f32,
+    pub mobility_lo: f32,
+    pub mobility_hi: f32,
     pub charge: u8,
     pub isotope: usize,
     pub peptide: PeptideIx,
@@ -102,6 +106,11 @@ pub fn build_feature_map(
                 // } else {
                 //     feat.calcmass
                 // };
+                let (mobility_lo, mobility_hi) = Tolerance::Pct(
+                    -settings.mobility_pct_tolerance,
+                    settings.mobility_pct_tolerance,
+                )
+                .bounds(feat.ims);
                 map.insert(
                     feat.peptide_idx,
                     PrecursorRange {
@@ -112,6 +121,8 @@ pub fn build_feature_map(
                         charge: feat.charge,
                         isotope: 0,
                         file_id: feat.file_id,
+                        mobility_lo,
+                        mobility_hi,
                         decoy: false,
                     },
                 );
@@ -163,13 +174,14 @@ pub fn build_feature_map(
         .par_chunks_mut(16 * 1024)
         .map(|chunk| {
             // There should always be at least one item in the chunk!
-            //  we know the chunk is already sorted by fragment_mz too, so this is minimum value
+            //  we know the chunk is already sorted by retention time too, so this is minimum value
             let min = chunk[0].rt;
             chunk.par_sort_unstable_by(|a, b| a.mass_lo.total_cmp(&b.mass_lo));
             min
         })
         .collect::<Vec<_>>();
 
+    log::trace!("building feature map");
     FeatureMap {
         ranges,
         min_rts,
@@ -205,21 +217,23 @@ impl FeatureMap {
             min_rt: rt - rt_tol,
         }
     }
+}
 
+impl FeatureMap {
     /// Run label-free quantification module
     pub fn quantify(
         &self,
         db: &IndexedDatabase,
-        spectra: &[ProcessedSpectrum],
+        spectra: &MS1Spectra,
         alignments: &[Alignment],
     ) -> HashMap<(PrecursorId, bool), (Peak, Vec<f64>), fnv::FnvBuildHasher> {
         let scores: DashMap<(PrecursorId, bool), Grid, fnv::FnvBuildHasher> = DashMap::default();
 
         log::info!("tracing MS1 features");
-        spectra
-            .par_iter()
-            .filter(|s| s.level == 1)
-            .for_each(|spectrum| {
+
+        // TODO: find a good way to abstract this ... I think a macro would be the way to go.
+        match spectra {
+            MS1Spectra::NoMobility(spectra) => spectra.par_iter().for_each(|spectrum| {
                 let a = alignments[spectrum.file_id];
                 let rt = (spectrum.scan_start_time / a.max_rt) * a.slope + a.intercept;
                 let query = self.rt_slice(rt, RT_TOL);
@@ -248,7 +262,42 @@ impl FeatureMap {
                         grid.add_entry(rt, entry.isotope, spectrum.file_id, peak.intensity);
                     }
                 }
-            });
+            }),
+            MS1Spectra::WithMobility(spectra) => spectra.par_iter().for_each(|spectrum| {
+                let a = alignments[spectrum.file_id];
+                let rt = (spectrum.scan_start_time / a.max_rt) * a.slope + a.intercept;
+                let query = self.rt_slice(rt, RT_TOL);
+
+                for peak in &spectrum.peaks {
+                    for entry in query.mass_mobility_lookup(peak.mass, peak.mobility) {
+                        let id = match self.settings.combine_charge_states {
+                            true => PrecursorId::Combined(entry.peptide),
+                            false => PrecursorId::Charged((entry.peptide, entry.charge)),
+                        };
+
+                        let mut grid = scores.entry((id, entry.decoy)).or_insert_with(|| {
+                            let p = &db[entry.peptide];
+                            let composition = p
+                                .sequence
+                                .iter()
+                                .map(|r| composition(*r))
+                                .sum::<Composition>();
+                            let dist = crate::isotopes::peptide_isotopes(
+                                composition.carbon,
+                                composition.sulfur,
+                            );
+                            Grid::new(entry, RT_TOL, dist, alignments.len(), GRID_SIZE)
+                        });
+
+                        grid.add_entry(rt, entry.isotope, spectrum.file_id, peak.intensity);
+                    }
+                }
+            }),
+            MS1Spectra::Empty => {
+                // Should never be called if no MS1 spectra are present
+                log::warn!("no MS1 spectra found for quantification");
+            }
+        };
 
         log::info!("integrating MS1 features");
 
@@ -608,7 +657,7 @@ fn convolve(slice: &[f64], kernel: &[f64]) -> Vec<f64> {
         .collect()
 }
 
-impl<'a> Query<'a> {
+impl Query<'_> {
     pub fn mass_lookup(&self, mass: f32) -> impl Iterator<Item = &PrecursorRange> {
         (self.page_lo..self.page_hi).flat_map(move |page| {
             let left_idx = page * self.bin_size;
@@ -634,6 +683,17 @@ impl<'a> Query<'a> {
                     && mass >= frag.mass_lo
                     && mass <= frag.mass_hi
             })
+        })
+    }
+
+    pub fn mass_mobility_lookup(
+        &self,
+        mass: f32,
+        mobility: f32,
+    ) -> impl Iterator<Item = &PrecursorRange> {
+        self.mass_lookup(mass).filter(move |precursor| {
+            // TODO: replace this magic number with a patameter.
+            (precursor.mobility_hi >= mobility) && (precursor.mobility_lo <= mobility)
         })
     }
 }

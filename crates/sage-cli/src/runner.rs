@@ -5,14 +5,14 @@ use anyhow::Context;
 use csv::ByteRecord;
 use log::info;
 use rayon::prelude::*;
-use sage_cloudpath::CloudPath;
+use sage_cloudpath::{CloudPath, FileFormat};
 use sage_core::database::IndexedDatabase;
 use sage_core::ion_series::Kind;
 use sage_core::lfq::{Peak, PrecursorId};
 use sage_core::mass::Tolerance;
 use sage_core::scoring::Fragments;
 use sage_core::scoring::{Feature, Scorer};
-use sage_core::spectrum::{ProcessedSpectrum, SpectrumProcessor};
+use sage_core::spectrum::{MS1Spectra, ProcessedSpectrum, RawSpectrum, SpectrumProcessor};
 use sage_core::tmt::TmtQuant;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -21,6 +21,61 @@ pub struct Runner {
     pub database: IndexedDatabase, // I could use a getter if I dont want to make this pub ...
     pub parameters: Search,
     start: Instant,
+}
+
+#[derive(Default)]
+struct RawSpectrumAccumulator {
+    pub ms1: Vec<RawSpectrum>,
+    pub msn: Vec<RawSpectrum>,
+}
+
+impl RawSpectrumAccumulator {
+    pub fn fold_op(mut self, rhs: RawSpectrum) -> Self {
+        if rhs.ms_level == 1 {
+            self.ms1.push(rhs);
+        } else {
+            self.msn.push(rhs);
+        }
+        self
+    }
+
+    pub fn reduce(mut self, other: Self) -> Self {
+        self.ms1.extend(other.ms1);
+        self.msn.extend(other.msn);
+        self
+    }
+}
+
+impl FromParallelIterator<RawSpectrum> for RawSpectrumAccumulator {
+    fn from_par_iter<I>(par_iter: I) -> Self
+    where
+        I: IntoParallelIterator<Item = RawSpectrum>,
+    {
+        
+
+        par_iter
+            .into_par_iter()
+            .fold(
+                RawSpectrumAccumulator::default,
+                RawSpectrumAccumulator::fold_op,
+            )
+            .reduce(
+                RawSpectrumAccumulator::default,
+                RawSpectrumAccumulator::reduce,
+            )
+    }
+}
+
+impl FromIterator<RawSpectrum> for RawSpectrumAccumulator {
+    fn from_iter<I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = RawSpectrum>,
+    {
+        iter.into_iter().fold(
+            RawSpectrumAccumulator::default(),
+            RawSpectrumAccumulator::fold_op,
+        )
+    }
 }
 
 impl Runner {
@@ -40,10 +95,10 @@ impl Runner {
 
         let database = parameters.database.clone().build(fasta);
         info!(
-            "generated {} fragments, {} peptides in {}ms",
+            "generated {} fragments, {} peptides in {:#?}",
             database.fragments.len(),
             database.peptides.len(),
-            (Instant::now() - start).as_millis()
+            (start.elapsed())
         );
         Ok(Self {
             database,
@@ -76,13 +131,14 @@ impl Runner {
     fn search_processed_spectra(
         &self,
         scorer: &Scorer,
-        spectra: Vec<ProcessedSpectrum>,
+        msn_spectra: Vec<ProcessedSpectrum<sage_core::spectrum::Peak>>,
+        ms1_spectra: MS1Spectra,
     ) -> SageResults {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let counter = AtomicUsize::new(0);
         let start = Instant::now();
 
-        let features: Vec<_> = spectra
+        let features: Vec<_> = msn_spectra
             .par_iter()
             .filter(|spec| spec.peaks.len() >= self.parameters.min_peaks && spec.level == 2)
             .map(|x| {
@@ -113,16 +169,19 @@ impl Runner {
                 if level != 2 && level != 3 {
                     log::warn!("TMT quant level set at {}, is this correct?", level);
                 }
-                sage_core::tmt::quantify(&spectra, isobaric, Tolerance::Ppm(-20.0, 20.0), level)
+                sage_core::tmt::quantify(&msn_spectra, isobaric, Tolerance::Ppm(-20.0, 20.0), level)
             })
             .unwrap_or_default();
-        let ms1 = spectra.into_iter().filter(|s| s.level == 1).collect();
 
         SageResults {
             features,
             quant,
-            ms1,
+            ms1: ms1_spectra,
         }
+    }
+
+    fn requires_ms1(&self) -> bool {
+        self.parameters.quant.lfq
     }
 
     fn process_chunk(
@@ -161,36 +220,83 @@ impl Runner {
             min_deisotope_mz.unwrap_or(0.0),
         );
 
-        let spectra = chunk
-            .par_iter()
-            .enumerate()
-            .flat_map(|(idx, path)| {
-                let file_id = chunk_idx * batch_size + idx;
-                let res = sage_cloudpath::util::read_spectra(
-                    path,
-                    file_id,
-                    sn,
-                    self.parameters.bruker_spectrum_processor,
-                );
+        // If the file format supports parallel reading, then we can read
+        // then it is faster to read each file in series. (since each spectra
+        // will be processed internally in parallel).
+        let file_serial_read = chunk
+            .iter()
+            .all(|path| FileFormat::from(path.as_ref()).within_file_parallel());
+        log::trace!("file serial read: {}", file_serial_read);
+        let inner_closure = |(idx, path)| {
+            let file_id = chunk_idx * batch_size + idx;
+            let res = sage_cloudpath::util::read_spectra(
+                path,
+                file_id,
+                sn,
+                self.parameters.bruker_spectrum_processor,
+                self.requires_ms1(),
+            );
 
-                match res {
-                    Ok(s) => {
-                        log::trace!("- {}: read {} spectra", path, s.len());
-                        Ok(s)
-                    }
-                    Err(e) => {
-                        log::error!("- {}: {}", path, e);
-                        Err(e)
-                    }
+            match res {
+                Ok(s) => {
+                    log::trace!("- {}: read {} spectra", path, s.len());
+                    Ok(s)
                 }
-            })
-            .flat_map_iter(|spectra| spectra.into_iter().map(|s| sp.process(s)))
+                Err(e) => {
+                    log::error!("- {}: {}", path, e);
+                    Err(e)
+                }
+            }
+        };
+
+        let spectra: RawSpectrumAccumulator = if file_serial_read {
+            chunk
+                .iter()
+                .enumerate()
+                .flat_map(inner_closure)
+                .flatten()
+                .collect()
+        } else {
+            chunk
+                .par_iter()
+                .enumerate()
+                .flat_map(inner_closure)
+                .flatten()
+                .collect()
+        };
+
+        let msn_spectra = spectra
+            .msn
+            .into_par_iter()
+            .map(|s| sp.process(s))
             .collect::<Vec<_>>();
+
+        // If all the MS1 spectra contain IMS, then we can process them
+        // we use the IMS! otherwise we dont.
+        // Note: Empty iterators return true.
+        let all_contain_ims = spectra.ms1.iter().all(|x| x.mobility.is_some());
+        let ms1_empty = spectra.ms1.is_empty();
+        let ms1_spectra = if ms1_empty {
+            log::trace!("no MS1 spectra found");
+            MS1Spectra::Empty
+        } else if all_contain_ims {
+            log::trace!("Processing MS1 spectra with IMS");
+            let spectra = spectra
+                .ms1
+                .into_iter()
+                .map(|x| sp.process_with_mobility(x))
+                .collect();
+            MS1Spectra::WithMobility(spectra)
+        } else {
+            log::trace!("Processing MS1 spectra without IMS");
+            let spectra = spectra.ms1.into_iter().map(|s| sp.process(s)).collect();
+            MS1Spectra::NoMobility(spectra)
+        };
 
         let io_time = Instant::now() - start;
         info!("- file IO: {:8} ms", io_time.as_millis());
 
-        self.search_processed_spectra(scorer, spectra)
+        self.search_processed_spectra(scorer, msn_spectra, ms1_spectra)
     }
 
     pub fn batch_files(&self, scorer: &Scorer, batch_size: usize) -> SageResults {
@@ -262,6 +368,7 @@ impl Runner {
 
         let areas = alignments.and_then(|alignments| {
             if self.parameters.quant.lfq {
+                log::trace!("performing LFQ");
                 let mut areas = sage_core::lfq::build_feature_map(
                     self.parameters.quant.lfq_settings,
                     self.parameters.precursor_charge,
@@ -655,11 +762,11 @@ impl Runner {
         );
         record.push_field(
             itoa::Buffer::new()
-                .format(
-                    (feature.charge < 2 || feature.charge > 6)
-                        .then_some(feature.charge)
-                        .unwrap_or(0),
-                )
+                .format(if feature.charge < 2 || feature.charge > 6 {
+                    feature.charge
+                } else {
+                    0
+                })
                 .as_bytes(),
         );
         record.push_field(itoa::Buffer::new().format(feature.peptide_len).as_bytes());

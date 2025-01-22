@@ -1,4 +1,4 @@
-use crate::enzyme::{Enzyme, EnzymeParameters};
+use crate::enzyme::{group_digests, Enzyme, EnzymeParameters};
 use crate::fasta::Fasta;
 use crate::ion_series::{IonSeries, Kind};
 use crate::mass::Tolerance;
@@ -134,6 +134,15 @@ impl Parameters {
         // and missed cleavages, if applicable.
         let digests = fasta.digest(&enzyme);
 
+        log::trace!("grouping digests");
+        let start_num = digests.len();
+        let digests = group_digests(digests);
+        log::trace!(
+            "grouped {} digests into {} groups",
+            start_num,
+            digests.len()
+        );
+
         let mods = self
             .variable_mods
             .iter()
@@ -143,9 +152,9 @@ impl Parameters {
         let targets: DashSet<_, FnvBuildHasher> = DashSet::default();
         digests
             .par_iter()
-            .filter(|digest| !digest.decoy)
+            .filter(|digest| !digest.reference.decoy)
             .for_each(|digest| {
-                targets.insert(digest.sequence.clone().into_bytes());
+                targets.insert(digest.reference.sequence.clone().into_bytes());
             });
 
         log::trace!("modifying peptides");
@@ -174,6 +183,7 @@ impl Parameters {
 
         log::trace!("sorting and deduplicating peptides");
 
+        let init_size = target_decoys.len();
         // This is equivalent to a stable sort
         target_decoys.par_sort_unstable_by(|a, b| {
             a.monoisotopic
@@ -181,7 +191,8 @@ impl Parameters {
                 .then_with(|| a.initial_sort(b))
         });
         target_decoys.dedup_by(|remove, keep| {
-            if remove.sequence == keep.sequence
+            if remove.monoisotopic == keep.monoisotopic
+                && remove.sequence == keep.sequence
                 && remove.modifications == keep.modifications
                 && remove.nterm == keep.nterm
                 && remove.cterm == keep.cterm
@@ -196,11 +207,16 @@ impl Parameters {
         target_decoys
             .par_iter_mut()
             .for_each(|peptide| peptide.proteins.sort_unstable());
+        let num_dropped = init_size - target_decoys.len();
+        log::trace!(
+            "dropped {} t/d pairs, remaining {}",
+            num_dropped,
+            target_decoys.len(),
+        );
 
         target_decoys
     }
 
-    // pub fn build(self) -> Result<IndexedDatabase, Box<dyn std::error::Error + Send + Sync + 'static>> {
     pub fn build(self, fasta: Fasta) -> IndexedDatabase {
         let target_decoys = self.digest(&fasta);
         log::trace!("generating fragments");
@@ -220,14 +236,14 @@ impl Parameters {
                     .flat_map(|kind| IonSeries::new(peptide, *kind).enumerate())
                     .filter(|(ion_idx, ion)| {
                         // Don't store b1, b2, y1, y2 ions for preliminary scoring
-                        let ion_idx_filter = match ion.kind {
+
+                        match ion.kind {
                             Kind::A | Kind::B | Kind::C => (ion_idx + 1) > self.min_ion_index,
                             Kind::X | Kind::Y | Kind::Z => {
                                 peptide.sequence.len().saturating_sub(1) - ion_idx
                                     > self.min_ion_index
                             }
-                        };
-                        ion_idx_filter
+                        }
                     })
                     .map(move |(_, ion)| Theoretical {
                         peptide_index: PeptideIx(idx as u32),
@@ -414,7 +430,7 @@ pub struct IndexedQuery<'d> {
     pub pre_idx_hi: usize,
 }
 
-impl<'d> IndexedQuery<'d> {
+impl IndexedQuery<'_> {
     /// Search for a specified `fragment_mz` within the database
     pub fn page_search(&self, fragment_mz: f32, charge: u8) -> impl Iterator<Item = &Theoretical> {
         let mass = fragment_mz * charge as f32;
@@ -423,6 +439,7 @@ impl<'d> IndexedQuery<'d> {
         // - relative tolerance needs to be proportionally decreased
         let tol = match self.fragment_tol {
             Tolerance::Ppm(lo, hi) => Tolerance::Ppm(lo / charge as f32, hi / charge as f32),
+            Tolerance::Pct(_, _) => unreachable!("Pct tolerance should never be used on mz"),
             Tolerance::Da(_, _) => self.fragment_tol,
         };
 
@@ -568,11 +585,11 @@ mod test {
             fasta.targets,
             vec![
                 (
-                    Arc::new("sp|AAAAA".to_string()),
+                    Arc::from("sp|AAAAA".to_string()),
                     "MEWKLEQSMREQALLKAQLTQLK".into()
                 ),
                 (
-                    Arc::new("sp|BBBBB".to_string()),
+                    Arc::from("sp|BBBBB".to_string()),
                     "RMEWKLEQSMREQALLKAQLTQLK".into()
                 ),
             ]
@@ -618,7 +635,7 @@ mod test {
 
         // All peptides are shared except for the protein N-term mod
         for peptide in &peptides[..4] {
-            assert_eq!(peptide.proteins.len(), 2);
+            assert_eq!(peptide.proteins.len(), 2, "{:?}", peptide);
         }
         // Ensure that this mod is uniquely called as the first protein
         assert_eq!(

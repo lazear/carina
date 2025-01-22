@@ -2,7 +2,7 @@ use crate::database::{IndexedDatabase, PeptideIx};
 use crate::heap::bounded_min_heapify;
 use crate::ion_series::{IonSeries, Kind};
 use crate::mass::{Tolerance, NEUTRON, PROTON};
-use crate::spectrum::{Precursor, ProcessedSpectrum};
+use crate::spectrum::{Peak, Precursor, ProcessedSpectrum};
 use serde::{Deserialize, Serialize};
 use std::ops::AddAssign;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -233,7 +233,7 @@ fn max_fragment_charge(max_fragment_charge: Option<u8>, precursor_charge: u8) ->
 }
 
 impl<'db> Scorer<'db> {
-    pub fn score(&self, query: &ProcessedSpectrum) -> Vec<Feature> {
+    pub fn score(&self, query: &ProcessedSpectrum<crate::spectrum::Peak>) -> Vec<Feature> {
         assert_eq!(
             query.level, 2,
             "internal bug, trying to score a non-MS2 scan!"
@@ -270,7 +270,7 @@ impl<'db> Scorer<'db> {
     /// in sorted order.
     fn matched_peaks_with_isotope(
         &self,
-        query: &ProcessedSpectrum,
+        query: &ProcessedSpectrum<crate::spectrum::Peak>,
         precursor_mass: f32,
         precursor_charge: u8,
         precursor_tol: Tolerance,
@@ -318,7 +318,7 @@ impl<'db> Scorer<'db> {
 
     fn matched_peaks(
         &self,
-        query: &ProcessedSpectrum,
+        query: &ProcessedSpectrum<Peak>,
         precursor_mass: f32,
         precursor_charge: u8,
         precursor_tol: Tolerance,
@@ -350,7 +350,7 @@ impl<'db> Scorer<'db> {
         }
     }
 
-    fn initial_hits(&self, query: &ProcessedSpectrum, precursor: &Precursor) -> InitialHits {
+    fn initial_hits(&self, query: &ProcessedSpectrum<Peak>, precursor: &Precursor) -> InitialHits {
         // Sage operates on masses without protons; [M] instead of [MH+]
         let mz = precursor.mz - PROTON;
 
@@ -399,7 +399,7 @@ impl<'db> Scorer<'db> {
     }
 
     /// Score a single [`ProcessedSpectrum`] against the database
-    pub fn score_standard(&self, query: &ProcessedSpectrum) -> Vec<Feature> {
+    pub fn score_standard(&self, query: &ProcessedSpectrum<Peak>) -> Vec<Feature> {
         let precursor = query.precursors.first().unwrap_or_else(|| {
             panic!("missing MS1 precursor for {}", query.id);
         });
@@ -414,7 +414,7 @@ impl<'db> Scorer<'db> {
     /// best PSMs ([`Feature`])
     fn build_features(
         &self,
-        query: &ProcessedSpectrum,
+        query: &ProcessedSpectrum<Peak>,
         precursor: &Precursor,
         hits: &InitialHits,
         report_psms: usize,
@@ -527,7 +527,7 @@ impl<'db> Scorer<'db> {
     }
 
     /// Remove peaks matching a PSM from a query spectrum
-    fn remove_matched_peaks(&self, query: &mut ProcessedSpectrum, psm: &Feature) {
+    fn remove_matched_peaks(&self, query: &mut ProcessedSpectrum<Peak>, psm: &Feature) {
         let peptide = &self.db[psm.peptide_idx];
         let fragments = self
             .db
@@ -563,7 +563,7 @@ impl<'db> Scorer<'db> {
 
     /// Return multiple PSMs for each spectra - first is the best match, second PSM is the best match
     /// after all theoretical peaks assigned to the best match are removed, etc
-    pub fn score_chimera_fast(&self, query: &ProcessedSpectrum) -> Vec<Feature> {
+    pub fn score_chimera_fast(&self, query: &ProcessedSpectrum<Peak>) -> Vec<Feature> {
         let precursor = query.precursors.first().unwrap_or_else(|| {
             panic!("missing MS1 precursor for {}", query.id);
         });
@@ -592,7 +592,7 @@ impl<'db> Scorer<'db> {
     /// Calculate full hyperscore for a given PSM
     fn score_candidate(
         &self,
-        query: &ProcessedSpectrum,
+        query: &ProcessedSpectrum<Peak>,
         pre_score: &PreScore,
     ) -> (Score, Option<Fragments>) {
         let mut score = Score {

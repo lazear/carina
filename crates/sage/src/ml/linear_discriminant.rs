@@ -42,7 +42,7 @@ const FEATURE_NAMES: [&str; FEATURES] = [
 
 struct Features<'a>(&'a [f64]);
 
-impl<'a> std::fmt::Debug for Features<'a> {
+impl std::fmt::Debug for Features<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_map()
             .entries(FEATURE_NAMES.iter().zip(self.0))
@@ -131,11 +131,13 @@ pub fn score_psms(scores: &mut [Feature], precursor_tol: Tolerance) -> Option<()
 
     let mass_error = match precursor_tol {
         Tolerance::Ppm(_, _) => |feat: &Feature| feat.delta_mass as f64,
+        Tolerance::Pct(_, _) => unreachable!("Pct tolerance should never be used on mz"),
         Tolerance::Da(_, _) => |feat: &Feature| (feat.expmass - feat.calcmass) as f64,
     };
 
     let (bw_adjust, bin_size) = match precursor_tol {
         Tolerance::Ppm(lo, hi) => (2.0f64, (hi - lo).max(100.0)),
+        Tolerance::Pct(_, _) => unreachable!("Pct tolerance should never be used on mz"),
         Tolerance::Da(lo, hi) => (0.1f64, (hi - lo).max(1000.0)),
     };
 

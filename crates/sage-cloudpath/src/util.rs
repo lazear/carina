@@ -4,11 +4,42 @@ use serde::Serialize;
 use tokio::io::AsyncReadExt;
 
 #[derive(Debug, PartialEq, Eq)]
-enum FileFormat {
+pub enum FileFormat {
     MzML,
     MGF,
     TDF,
     Unidentified,
+}
+
+impl FileFormat {
+    /// Does this file format support parallel reading?
+    /// By this I mean that there is 'within' file parallelism that
+    /// would make it faster to read than reading mutiple files in
+    /// parallel. (is giving 4 cores to read 1 file 4 times, faster
+    /// than giving 1 cores to read 1 file and read 4 at the same time)
+    pub fn within_file_parallel(&self) -> bool {
+        match self {
+            FileFormat::MzML => false,
+            FileFormat::MGF => false,
+            FileFormat::TDF => true,
+            FileFormat::Unidentified => false,
+        }
+    }
+}
+
+impl From<&str> for FileFormat {
+    fn from(s: &str) -> Self {
+        let path_lower = s.to_lowercase();
+        if path_lower.ends_with(".mgf.gz") || path_lower.ends_with(".mgf") {
+            FileFormat::MGF
+        } else if is_bruker(&path_lower) {
+            FileFormat::TDF
+        } else if path_lower.ends_with(".mzml.gz") || path_lower.ends_with(".mzml") {
+            FileFormat::MzML
+        } else {
+            FileFormat::Unidentified
+        }
+    }
 }
 
 const BRUKER_EXTENSIONS: [&str; 5] = [".d", ".tdf", ".tdf_bin", "ms2", "raw"];
@@ -25,29 +56,17 @@ fn is_bruker(path: &str) -> bool {
     })
 }
 
-fn identify_format(s: &str) -> FileFormat {
-    let path_lower = s.to_lowercase();
-    if path_lower.ends_with(".mgf.gz") || path_lower.ends_with(".mgf") {
-        FileFormat::MGF
-    } else if is_bruker(&path_lower) {
-        FileFormat::TDF
-    } else if path_lower.ends_with(".mzml.gz") || path_lower.ends_with(".mzml") {
-        FileFormat::MzML
-    } else {
-        FileFormat::Unidentified
-    }
-}
-
 pub fn read_spectra<S: AsRef<str>>(
     path: S,
     file_id: usize,
     sn: Option<u8>,
     bruker_processor: BrukerSpectrumProcessor,
+    requires_ms1: bool,
 ) -> Result<Vec<RawSpectrum>, Error> {
-    match identify_format(path.as_ref()) {
+    match FileFormat::from(path.as_ref()) {
         FileFormat::MzML => read_mzml(path, file_id, sn),
         FileFormat::MGF => read_mgf(path, file_id),
-        FileFormat::TDF => read_tdf(path, file_id, bruker_processor),
+        FileFormat::TDF => read_tdf(path, file_id, bruker_processor, requires_ms1),
         FileFormat::Unidentified => panic!("Unable to get type for '{}'", path.as_ref()), // read_mzml(path, file_id, sn),
     }
 }
@@ -69,8 +88,9 @@ pub fn read_tdf<S: AsRef<str>>(
     s: S,
     file_id: usize,
     bruker_spectrum_processor: BrukerSpectrumProcessor,
+    requires_ms1: bool,
 ) -> Result<Vec<RawSpectrum>, Error> {
-    let res = crate::tdf::TdfReader.parse(s, file_id, bruker_spectrum_processor);
+    let res = crate::tdf::TdfReader.parse(s, file_id, bruker_spectrum_processor, requires_ms1);
     match res {
         Ok(t) => Ok(t),
         Err(e) => Err(Error::TDF(e)),
@@ -147,12 +167,12 @@ mod test {
 
     #[test]
     fn test_identify_format() {
-        assert_eq!(identify_format("foo.mzml"), FileFormat::MzML);
-        assert_eq!(identify_format("foo.mzML"), FileFormat::MzML);
-        assert_eq!(identify_format("foo.mgf"), FileFormat::MGF);
-        assert_eq!(identify_format("foo.mgf.gz"), FileFormat::MGF);
-        assert_eq!(identify_format("foo.tdf"), FileFormat::TDF);
-        assert_eq!(identify_format("./tomato/foo.d"), FileFormat::TDF);
-        assert_eq!(identify_format("./tomato/foo.d/"), FileFormat::TDF);
+        assert_eq!(FileFormat::from("foo.mzml"), FileFormat::MzML);
+        assert_eq!(FileFormat::from("foo.mzML"), FileFormat::MzML);
+        assert_eq!(FileFormat::from("foo.mgf"), FileFormat::MGF);
+        assert_eq!(FileFormat::from("foo.mgf.gz"), FileFormat::MGF);
+        assert_eq!(FileFormat::from("foo.tdf"), FileFormat::TDF);
+        assert_eq!(FileFormat::from("./tomato/foo.d"), FileFormat::TDF);
+        assert_eq!(FileFormat::from("./tomato/foo.d/"), FileFormat::TDF);
     }
 }

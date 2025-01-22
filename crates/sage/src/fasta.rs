@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Fasta {
-    pub targets: Vec<(Arc<String>, String)>,
+    pub targets: Vec<(Arc<str>, String)>,
     decoy_tag: String,
     // Should we ignore decoys in the fasta database
     // and generate them internally?
@@ -27,8 +27,8 @@ impl Fasta {
             let line = line.trim();
             if let Some(id) = line.strip_prefix('>') {
                 if !s.is_empty() {
-                    let acc: Arc<String> =
-                        Arc::new(last_id.split_ascii_whitespace().next().unwrap().to_string());
+                    let acc: Arc<str> =
+                        Arc::from(last_id.split_ascii_whitespace().next().unwrap().to_string());
                     let seq = std::mem::take(&mut s);
                     if !acc.contains(&decoy_tag) || !generate_decoys {
                         targets.push((acc, seq));
@@ -41,8 +41,8 @@ impl Fasta {
         }
 
         if !s.is_empty() {
-            let acc: Arc<String> =
-                Arc::new(last_id.split_ascii_whitespace().next().unwrap().to_string());
+            let acc: Arc<str> =
+                Arc::from(last_id.split_ascii_whitespace().next().unwrap().to_string());
             if !acc.contains(&decoy_tag) || !generate_decoys {
                 targets.push((acc, s));
             }
