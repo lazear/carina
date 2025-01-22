@@ -167,12 +167,12 @@ mod test {
 
     #[test]
     fn test_identify_format() {
-        assert_eq!(identify_format("foo.mzml"), FileFormat::MzML);
-        assert_eq!(identify_format("foo.mzML"), FileFormat::MzML);
-        assert_eq!(identify_format("foo.mgf"), FileFormat::MGF);
-        assert_eq!(identify_format("foo.mgf.gz"), FileFormat::MGF);
-        assert_eq!(identify_format("foo.tdf"), FileFormat::TDF);
-        assert_eq!(identify_format("./tomato/foo.d"), FileFormat::TDF);
-        assert_eq!(identify_format("./tomato/foo.d/"), FileFormat::TDF);
+        assert_eq!(FileFormat::from("foo.mzml"), FileFormat::MzML);
+        assert_eq!(FileFormat::from("foo.mzML"), FileFormat::MzML);
+        assert_eq!(FileFormat::from("foo.mgf"), FileFormat::MGF);
+        assert_eq!(FileFormat::from("foo.mgf.gz"), FileFormat::MGF);
+        assert_eq!(FileFormat::from("foo.tdf"), FileFormat::TDF);
+        assert_eq!(FileFormat::from("./tomato/foo.d"), FileFormat::TDF);
+        assert_eq!(FileFormat::from("./tomato/foo.d/"), FileFormat::TDF);
     }
 }
