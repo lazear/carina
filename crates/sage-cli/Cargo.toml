@@ -27,6 +27,7 @@ csv = "1"
 clap = { version = "4.0", features = ["cargo", "unicode"] }
 env_logger = "0.8.4"
 fnv = "1.0"
+glob = "0.3.1"
 log = "0.4.0"
 itoa = "1.0"
 num_cpus = "1.13"

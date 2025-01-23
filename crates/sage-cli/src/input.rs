@@ -9,6 +9,7 @@ use sage_core::{
     tmt::Isobaric,
 };
 use serde::{Deserialize, Serialize};
+use glob::glob;
 
 #[derive(Serialize)]
 /// Actual search parameters - may include overrides or default values not set by user
@@ -184,7 +185,28 @@ impl Input {
             input.database.fasta = Some(fasta.into());
         }
         if let Some(mzml_paths) = matches.get_many::<String>("mzml_paths") {
-            input.mzml_paths = Some(mzml_paths.into_iter().map(|p| p.into()).collect());
+            let mut paths = Vec::new();
+            for path_pattern in mzml_paths {
+                match glob(path_pattern) {
+                    Ok(glob_paths) => {
+                        for entry in glob_paths {
+                            match entry {
+                                Ok(path) => {
+                                    // Convert PathBuf to String, handle potential conversion error
+                                    if let Some(path_str) = path.to_str() {
+                                        paths.push(path_str.to_string());
+                                    } else {
+                                        log::error!("Error converting path to string: {:?}", path);
+                                    }
+                                },
+                                Err(e) => log::error!("Error processing path: {}", e),
+                            }
+                        }
+                    },
+                    Err(e) => log::error!("Glob pattern error: {}", e),
+                }
+            }
+            input.mzml_paths = Some(paths);
         }
 
         if let Some(write_pin) = matches.get_one::<bool>("write-pin").copied() {
