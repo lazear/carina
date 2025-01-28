@@ -8,7 +8,7 @@ use std::ops::AddAssign;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Structure to hold temporary scores
-#[derive(Copy, Clone, Default, Debug)]
+#[derive(Copy, Clone, Default, Debug, PartialEq, PartialOrd)]
 struct Score {
     peptide: PeptideIx,
     matched_b: u16,
@@ -21,6 +21,16 @@ struct Score {
     ppm_difference: f32,
     precursor_charge: u8,
     isotope_error: i8,
+}
+
+impl Eq for Score {}
+
+impl Ord for Score {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.hyperscore
+            .partial_cmp(&other.hyperscore)
+            .unwrap_or(std::cmp::Ordering::Less)
+    }
 }
 
 /// Preliminary score - # of matched peaks for each candidate peptide
@@ -227,24 +237,26 @@ impl<'db> Scorer<'db> {
             let mut score_vector = hits
                 .preliminary
                 .iter()
-                .filter(|score| score.peptide != PeptideIx::default())
-                .map(|pre| self.score_candidate(query, pre))
-                .filter(|s| (s.0.matched_b + s.0.matched_y) >= self.min_matched_peaks)
+                .filter_map(|pre| {
+                    if pre.peptide != PeptideIx::default() {
+                        return None;
+                    }
+                    let (score, _) = self.score_candidate(query, pre);
+                    if (score.matched_b + score.matched_y) < self.min_matched_peaks {
+                        return None;
+                    }
+                    Some(score)
+                })
                 .collect::<Vec<_>>();
-
-            score_vector.sort_by(|a, b| b.0.hyperscore.total_cmp(&a.0.hyperscore));
-            score_vector
+            let k = self.report_psms.min(score_vector.len());
+            bounded_min_heapify(&mut score_vector, k);
+            score_vector.iter().map(|x| x.peptide).collect()
+        } else {
+            hits.preliminary
                 .iter()
-                .take(self.report_psms.min(score_vector.len()))
-                .map(|x| x.0.peptide)
+                .map(|x| x.peptide)
                 .filter(|&peptide| peptide != PeptideIx::default())
                 .collect()
-        } else {
-        hits.preliminary
-            .iter()
-            .map(|x| x.peptide)
-            .filter(|&peptide| peptide != PeptideIx::default())
-            .collect()
         }
     }
 
